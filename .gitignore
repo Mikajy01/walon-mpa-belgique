@@ -1,0 +1,28 @@
+# Environnement Python
+.venv/
+.venv_build/
+__pycache__/
+*.pyc
+
+# Données locales régénérables (état d'exécution, PAS du code source) --
+# contrairement à cloud/, ce GUI tourne en local sur la machine de
+# l'utilisateur : state/ contient SES résultats personnels, pas un
+# livrable à versionner ici (voir cloud/state/ pour la source de vérité
+# commune, poussée via GitHub Actions).
+cache/
+logs/
+state/
+
+# Build/packaging (PyInstaller, voir walon-map-france)
+build/
+dist/
+*.spec
+
+# Fichiers Excel réels (sortie utilisateur) -- SAUF le gabarit officiel
+# bundlé avec l'app, qui doit rester tracké.
+*.xlsx
+!templates/*.xlsx
+
+# OS/éditeur
+.DS_Store
+Thumbs.db
