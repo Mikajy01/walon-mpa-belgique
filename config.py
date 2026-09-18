@@ -10,6 +10,7 @@ dynamique (le gabarit vu n'a aucune icône ancrée) — voir
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 APP_VERSION = "0.1.0"
@@ -18,7 +19,16 @@ APP_VERSION = "0.1.0"
 # Chemins
 # ---------------------------------------------------------------------------
 
-BASE_DIR = Path(__file__).resolve().parent
+# Sous PyInstaller (`sys.frozen`), `__file__` pointe vers le dossier
+# temporaire d'extraction (_MEIxxxxxx, effacé à la fermeture) -- jamais
+# fiable pour un fichier censé rester à côté de l'exe (le gabarit
+# officiel, voir TEMPLATE_PATH). Même motif que
+# walon-map-france/config.py : `sys.executable` donne le VRAI
+# emplacement de l'exe installé, utilisé comme BASE_DIR dans ce cas.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent
 
 TEMPLATE_PATH = BASE_DIR / "templates" / "gabarit_officiel.xlsx"
 CACHE_DIR = BASE_DIR / "cache"
