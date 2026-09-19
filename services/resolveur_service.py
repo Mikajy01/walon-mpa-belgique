@@ -5,16 +5,47 @@ seules DE/DV/EB/FE restent sans source confirmée, voir le docstring de
 (position d'adresse, Lambert 72) en appelant chaque service thématique
 déjà construit et vérifié.
 
-Principe de sortie : `Dict[str, str]` lettre de colonne Excel -> valeur
-("O"/"N"/texte).
+Principe de sortie : `resoudre()` renvoie `(valeurs, erreurs)` --
+`valeurs` : `Dict[str, str]` lettre de colonne Excel -> valeur
+("O"/"N"/"ERREUR"/texte) ; `erreurs` : `Set[str]` des lettres dont la
+valeur dans `valeurs` est "ERREUR" (sous-ensemble de `valeurs.keys()`,
+jamais recalculé ailleurs -- pratique pour `main.py`/`erreurs_service.py`
+qui doivent tracer CES colonnes précises sans reparcourir tout `valeurs`).
+
+**"N" vs "ERREUR" -- distinction stricte, décision explicite de
+l'utilisateur (2026-09-19)** : une réponse WFS/API valide qui ne trouve
+simplement aucune correspondance continue de dégrader en "N" (légitime,
+voir plus bas). Une VRAIE panne réseau/API (timeout, 5xx, connexion
+refusée -- voir `services/exceptions.py` + les `except
+(requests.exceptions.RequestException, ApiServiceError): raise` ajoutés
+le 2026-09-19 dans CHAQUE service `wfs_*.py`, qui laissent maintenant ces
+erreurs remonter jusqu'ici au lieu de les avaler en `None`) écrit
+"ERREUR" à la place, JAMAIS "N" -- ancien comportement (jusqu'au
+2026-09-19) : une panne réseau ponctuelle produisait un "N" indiscernable
+d'une vraie réponse négative, et restait fausse de façon PERMANENTE une
+fois la ligne écrite (`lire_capakeys_deja_ecrits` fait sauter toute ligne
+déjà présente lors d'un run normal -- jamais retraitée). "ERREUR" est
+tracée par l'appelant (voir `services/erreurs_service.py`,
+`config.CELLULES_A_REVISITER_PATH`) et retentée automatiquement au
+prochain run (`reessayer_cellules_erreur`, appelé en tout début de
+`main.py::executer_traitement`) -- même principe que
+walon-map-france-cloud (`cellules_a_revisiter.csv` /
+`reessayer_cellules_wfs`), adapté à la structure plus simple de ce
+pipeline (un seul appel `resoudre()` recalcule TOUTES les colonnes d'un
+point, pas ~5 catégories séparées comme côté France).
+
+Catch volontairement RESTREINT (voir `_get`) à
+`(requests.exceptions.RequestException, ApiServiceError)` -- jamais une
+exception de programmation (ex `TypeError`, `KeyError` d'un vrai bug),
+qui doit continuer à faire planter le run : un bug reste un bug, jamais
+masqué en "ERREUR" récupérable.
 
 **Groupes "un seul parmi plusieurs" (Gewestplan, paliers watertoets,
 bruit, pollution des sols OVAM)** : décision du 2026-09-17 (demande
-explicite de l'utilisateur) -- `_un_parmi()` écrit maintenant "N" dans
-TOUTES les colonnes sœurs dès que le service a répondu, pas seulement
-"O" dans la gagnante. Ce n'est sûr QUE parce que chaque service
-concerné garantit une réponse EXHAUSTIVE une fois qu'il a répondu sans
-exception :
+explicite de l'utilisateur) -- `_un_parmi()` écrit "N" dans TOUTES les
+colonnes sœurs dès que le service a répondu SANS exception, pas
+seulement "O" dans la gagnante. Ce n'est sûr QUE parce que chaque service
+concerné garantit une réponse EXHAUSTIVE une fois qu'il a répondu :
 - Gewestplan (`lu:lu_gwp_gv`) et les paliers watertoets pluvial/fluvial/
   zee ont une légende OFFICIELLE confirmée en direct qui couvre TOUT le
   territoire (y compris un palier explicite "A -- Geen ... gemodelleerd"
@@ -27,25 +58,24 @@ exception :
   palier "en dessous du seuil" officiel distinct de "hors zone
   modélisée" dans les données sources (voir `wfs_bruit_service.py`) --
   extension DÉLIBÉRÉE du même principe qu'utilisent déjà ~100 autres
-  colonnes de ce pipeline (`None` = "N", que la couche n'ait renvoyé
-  aucune entité OU qu'une erreur réseau soit survenue, la distinction
-  n'étant exposée nulle part ailleurs dans ce projet non plus) --
-  cohérent avec l'existant, pas un risque nouveau.
-Chaque service continue de journaliser un avertissement sur une
-vraie erreur réseau ; le "N" écrit dans ce cas est donc une hypothèse
-DÉJÀ acceptée partout ailleurs dans ce pipeline, pas une nouveauté
-propre aux groupes à choix unique.
+  colonnes de ce pipeline (`None` = "N" pour une réponse SANS exception)
+  -- cohérent avec l'existant, pas un risque nouveau. Une exception sur
+  CE groupe marque maintenant TOUTES ses colonnes sœurs "ERREUR" (voir
+  `_un_parmi_resilient`), jamais "N".
 
-Gewestplan reste le seul groupe où le remplissage est conditionné à une
-réponse BRUTE non vide du service (`svnaam_categories`) avant de
+Gewestplan reste le seul groupe où le remplissage "N" est conditionné à
+une réponse BRUTE non vide du service (`svnaam_categories`) avant de
 marquer "N" partout -- 26 colonnes d'un coup sur une fausse déduction
 aurait un impact bien plus large qu'une colonne seule, marge de
 prudence supplémentaire justifiée par la taille du groupe."""
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, Set
+from typing import Callable, Dict, Optional, Sequence, Set, Tuple
 
+import requests
+
+from services.exceptions import ApiServiceError
 from services.wfs_advieskaart_service import WfsAdvieskaartService
 from services.wfs_afstromingskaart_service import WfsAfstromingskaartService
 from services.wfs_gewestplan_service import WfsGewestplanService
@@ -85,6 +115,12 @@ ALIAS_GEWESTPLAN_CONNUS: Dict[str, str] = {
     normaliser("landschappelijk waardevolle agrarische gebieden"): "Z",
 }
 
+# Sentinel interne (jamais exposé hors de ce module) -- distingue "fn()
+# a levé une erreur réseau/API" de "fn() a légitimement renvoyé None"
+# (aucune correspondance, réponse SANS exception). `is` uniquement,
+# jamais `==` (voir `_get`).
+_ERREUR = object()
+
 
 def _un_parmi(valeurs: Dict[str, str], colonnes: Sequence[str], gagnants: Optional[Set[str]] = None) -> None:
     """Marque chaque colonne de `colonnes` "O" si elle est dans
@@ -95,6 +131,54 @@ def _un_parmi(valeurs: Dict[str, str], colonnes: Sequence[str], gagnants: Option
     gagnants = gagnants or set()
     for c in colonnes:
         valeurs[c] = "O" if c in gagnants else "N"
+
+
+def _get(erreurs: Set[str], colonnes: Sequence[str], nom: str, fn: Callable[[], object]) -> object:
+    """Exécute `fn()` ; renvoie son résultat normal (potentiellement
+    `None`, une vraie absence de correspondance -- laissée telle quelle
+    à l'appelant). Sur une erreur réseau/API connue -- voir le docstring
+    du module --, ajoute `colonnes` à `erreurs` et renvoie le sentinel
+    `_ERREUR` plutôt que d'avaler silencieusement en `None` (ancien
+    comportement, corrigé le 2026-09-19). Catch volontairement RESTREINT :
+    toute autre exception (bug de programmation) continue de remonter et
+    de faire planter le run, jamais masquée."""
+    try:
+        return fn()
+    except (requests.exceptions.RequestException, ApiServiceError) as exc:
+        _logger.warning(
+            "%s : erreur réseau/API (%s) -- colonne(s) %s marquée(s) \"ERREUR\" (retentée(s) "
+            "automatiquement au prochain run, voir services/erreurs_service.py).",
+            nom, exc, ",".join(sorted(colonnes)),
+        )
+        erreurs.update(colonnes)
+        return _ERREUR
+
+
+def _colonne_resiliente(
+    valeurs: Dict[str, str], erreurs: Set[str], lettre: str, nom: str, fn: Callable[[], Optional[str]],
+) -> None:
+    """Équivalent résilient de `v = fn(); if v is not None: valeurs[lettre] = v`
+    -- voir `_get`."""
+    v = _get(erreurs, (lettre,), nom, fn)
+    if v is _ERREUR:
+        valeurs[lettre] = "ERREUR"
+    elif v is not None:
+        valeurs[lettre] = v
+
+
+def _un_parmi_resilient(
+    valeurs: Dict[str, str], erreurs: Set[str], colonnes: Sequence[str], nom: str,
+    fn: Callable[[], Optional[str]],
+) -> None:
+    """Équivalent résilient de `_un_parmi(valeurs, colonnes, {fn()} if fn() else None)`
+    -- sur une erreur réseau/API, TOUTES les colonnes sœurs deviennent
+    "ERREUR" (jamais "N", voir `_get`/le docstring du module)."""
+    c = _get(erreurs, colonnes, nom, fn)
+    if c is _ERREUR:
+        for col in colonnes:
+            valeurs[col] = "ERREUR"
+        return
+    _un_parmi(valeurs, colonnes, {c} if c else None)
 
 
 class ResolveurBE:
@@ -129,10 +213,12 @@ class ResolveurBE:
         self._advieskaart = advieskaart
         self._ruilverkaveling = ruilverkaveling
 
-    def resoudre(self, x: float, y: float) -> Dict[str, str]:
+    def resoudre(self, x: float, y: float) -> Tuple[Dict[str, str], Set[str]]:
         """`x`/`y` : position (Lambert 72, EPSG:31370) — la position de
-        l'adresse liée à la parcelle (voir `AdresseBE`)."""
+        l'adresse liée à la parcelle (voir `AdresseBE`). Renvoie
+        `(valeurs, erreurs)` -- voir le docstring du module."""
         valeurs: Dict[str, str] = {}
+        erreurs: Set[str] = set()
 
         # -- Gewestplan (un seul parmi 26, correspondance floue) -------
         # Backfill "N" conditionné à une réponse BRUTE non vide (voir le
@@ -140,8 +226,11 @@ class ResolveurBE:
         # supplémentaire vu sa taille (26 colonnes d'un coup).
         gewestplan_colonnes = tuple(l for l, i in COLONNES_BE.items() if i["groupe"] == "gewestplan")
         candidats_gwp = {l: i["categorie"] for l, i in COLONNES_BE.items() if i["groupe"] == "gewestplan"}
-        svnaam_trouves = self._gewestplan.svnaam_categories(x, y)
-        if svnaam_trouves:
+        svnaam_trouves = _get(erreurs, gewestplan_colonnes, "Gewestplan", lambda: self._gewestplan.svnaam_categories(x, y))
+        if svnaam_trouves is _ERREUR:
+            for col in gewestplan_colonnes:
+                valeurs[col] = "ERREUR"
+        elif svnaam_trouves:
             gagnants_gwp: Set[str] = set()
             for svnaam in svnaam_trouves:
                 colonne = ALIAS_GEWESTPLAN_CONNUS.get(normaliser(svnaam)) or meilleure_correspondance(svnaam, candidats_gwp)
@@ -155,64 +244,62 @@ class ResolveurBE:
         geluid_wegen = tuple(l for l, i in COLONNES_BE.items() if i["groupe"] == "geluid_wegen")
         geluid_luchthaven = tuple(l for l, i in COLONNES_BE.items() if i["groupe"] == "geluid_luchthaven")
         geluid_spoorwegen = tuple(l for l, i in COLONNES_BE.items() if i["groupe"] == "geluid_spoorwegen")
-        c = self._bruit.colonne_bruit_routes(x, y)
-        _un_parmi(valeurs, geluid_wegen, {c} if c else None)
-        c = self._bruit.colonne_bruit_aeroport(x, y)
-        _un_parmi(valeurs, geluid_luchthaven, {c} if c else None)
-        c = self._bruit.colonne_bruit_voies_ferrees(x, y)
-        _un_parmi(valeurs, geluid_spoorwegen, {c} if c else None)
+        _un_parmi_resilient(valeurs, erreurs, geluid_wegen, "bruit routes", lambda: self._bruit.colonne_bruit_routes(x, y))
+        _un_parmi_resilient(valeurs, erreurs, geluid_luchthaven, "bruit aéroport", lambda: self._bruit.colonne_bruit_aeroport(x, y))
+        _un_parmi_resilient(valeurs, erreurs, geluid_spoorwegen, "bruit voies ferrées", lambda: self._bruit.colonne_bruit_voies_ferrees(x, y))
 
         # -- Watertoets ---------------------------------------------------
-        overstr = self._watertoets.overstromingsgevoelig(x, y)
-        gagnant_dcdd = "DC" if overstr == "mogelijk" else "DD" if overstr == "effectief" else None
-        _un_parmi(valeurs, ("DC", "DD"), {gagnant_dcdd} if gagnant_dcdd else None)
+        overstr = _get(erreurs, ("DC", "DD"), "watertoets overstromingsgevoelig", lambda: self._watertoets.overstromingsgevoelig(x, y))
+        if overstr is _ERREUR:
+            valeurs["DC"] = "ERREUR"
+            valeurs["DD"] = "ERREUR"
+        else:
+            gagnant_dcdd = "DC" if overstr == "mogelijk" else "DD" if overstr == "effectief" else None
+            _un_parmi(valeurs, ("DC", "DD"), {gagnant_dcdd} if gagnant_dcdd else None)
 
-        signaal = self._watertoets.signaalgebied_categorie(x, y)
-        gagnant_dtdu = "DT" if signaal == "Bouwvrije opgave" else "DU" if signaal == "Verscherpte watertoets" else None
-        _un_parmi(valeurs, ("DT", "DU"), {gagnant_dtdu} if gagnant_dtdu else None)
+        signaal = _get(erreurs, ("DT", "DU"), "watertoets signaalgebied_categorie", lambda: self._watertoets.signaalgebied_categorie(x, y))
+        if signaal is _ERREUR:
+            valeurs["DT"] = "ERREUR"
+            valeurs["DU"] = "ERREUR"
+        else:
+            gagnant_dtdu = "DT" if signaal == "Bouwvrije opgave" else "DU" if signaal == "Verscherpte watertoets" else None
+            _un_parmi(valeurs, ("DT", "DU"), {gagnant_dtdu} if gagnant_dtdu else None)
 
         # DX : colonne seule (pas de sœur) -- risicozone() renvoie le
         # texte du champ si une feature existe, sinon None (jamais
         # deviné entre "hors zone" et "pas de risque", même convention
         # que les ~100 autres colonnes existence-only du pipeline).
-        valeurs["DX"] = "O" if self._watertoets.risicozone(x, y) else "N"
+        dx = _get(erreurs, ("DX",), "watertoets risicozone", lambda: self._watertoets.risicozone(x, y))
+        valeurs["DX"] = "ERREUR" if dx is _ERREUR else ("O" if dx else "N")
 
-        lbl = self._watertoets.van_nature_overstroombaar(x, y)
-        if lbl:
+        lbl = _get(erreurs, ("DW",), "watertoets van_nature_overstroombaar", lambda: self._watertoets.van_nature_overstroombaar(x, y))
+        if lbl is _ERREUR:
+            valeurs["DW"] = "ERREUR"
+        elif lbl:
             valeurs["DW"] = "O" if "niet" not in lbl.lower() else "N"
 
         # DZ : `overstromingsgebied_oeverzone_iwb` renvoie déjà "O"/"N"
-        # (voir `_existe_wfs`) -- écrire directement la valeur au lieu
-        # de filtrer sur "O" comme avant (le "N" calculé était jeté).
-        dz = self._watertoets.overstromingsgebied_oeverzone_iwb(x, y)
-        if dz is not None:
-            valeurs["DZ"] = dz
+        # (voir `_existe_wfs`) -- écrire directement la valeur.
+        _colonne_resiliente(valeurs, erreurs, "DZ", "watertoets overstromingsgebied_oeverzone_iwb", lambda: self._watertoets.overstromingsgebied_oeverzone_iwb(x, y))
 
-        iwb = self._watertoets.colonne_afgebakend_oeverzone_iwb(x, y)
-        _un_parmi(valeurs, ("DR", "DS"), {iwb} if iwb else None)
+        _un_parmi_resilient(valeurs, erreurs, ("DR", "DS"), "watertoets colonne_afgebakend_oeverzone_iwb", lambda: self._watertoets.colonne_afgebakend_oeverzone_iwb(x, y))
+        _un_parmi_resilient(valeurs, erreurs, ("DF", "DG", "DH", "DI"), "watertoets pluviaal", lambda: self._watertoets.colonne_overstromingsgevoelig_pluviaal(x, y))
+        _un_parmi_resilient(valeurs, erreurs, ("DJ", "DK", "DL", "DM"), "watertoets fluviaal", lambda: self._watertoets.colonne_overstromingsgevoelig_fluviaal(x, y))
+        _un_parmi_resilient(valeurs, erreurs, ("DN", "DO", "DP", "DQ"), "watertoets zee", lambda: self._watertoets.colonne_overstromingsgevoelig_zee(x, y))
 
-        pluvial = self._watertoets.colonne_overstromingsgevoelig_pluviaal(x, y)
-        _un_parmi(valeurs, ("DF", "DG", "DH", "DI"), {pluvial} if pluvial else None)
-        fluvial = self._watertoets.colonne_overstromingsgevoelig_fluviaal(x, y)
-        _un_parmi(valeurs, ("DJ", "DK", "DL", "DM"), {fluvial} if fluvial else None)
-        zee = self._watertoets.colonne_overstromingsgevoelig_zee(x, y)
-        _un_parmi(valeurs, ("DN", "DO", "DP", "DQ"), {zee} if zee else None)
-
-        v = self._watertoets.recent_overstroomd(x, y)
-        if v is not None:
-            valeurs["DY"] = v
+        _colonne_resiliente(valeurs, erreurs, "DY", "watertoets recent_overstroomd", lambda: self._watertoets.recent_overstroomd(x, y))
 
         # -- Économie (EN valeur brute + EO->ER existence) ---------------
-        aangeboden = self._economie.aangeboden_perceel(x, y)
-        if aangeboden is not None:
+        aangeboden = _get(erreurs, ("EN",), "economie aangeboden_perceel", lambda: self._economie.aangeboden_perceel(x, y))
+        if aangeboden is _ERREUR:
+            valeurs["EN"] = "ERREUR"
+        elif aangeboden is not None:
             valeurs["EN"] = "O" if aangeboden == "aangeboden" else "N"
         for lettre, methode in (
             ("EO", self._economie.bedrijventerrein), ("EP", self._economie.beheerde_bedrijvenzone),
             ("EQ", self._economie.ontwikkelbare_bedrijvenzone), ("ER", self._economie.planningszone),
         ):
-            v = methode(x, y)
-            if v is not None:
-                valeurs[lettre] = v
+            _colonne_resiliente(valeurs, erreurs, lettre, f"economie {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Landinrichting / Natuurinrichting / Woningbouw --------------
         for lettre, methode in (
@@ -224,17 +311,15 @@ class ResolveurBE:
             ("GF", self._woningbouw.woningbouwgebied),
             ("GG", self._woningbouw.woonvernieuwingsgebied),
         ):
-            v = methode(x, y)
-            if v is not None:
-                valeurs[lettre] = v
+            _colonne_resiliente(valeurs, erreurs, lettre, f"landinrichting {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Landschap ------------------------------------------------
-        fb = self._landschap.fysische_systeemeenheid(x, y)
-        if fb is not None:
+        fb = _get(erreurs, ("FB",), "landschap fysische_systeemeenheid", lambda: self._landschap.fysische_systeemeenheid(x, y))
+        if fb is _ERREUR:
+            valeurs["FB"] = "ERREUR"
+        elif fb is not None:
             valeurs["FB"] = "N" if fb == "Onbepaald" else "O"
-        fc = self._landschap.traditioneel_landschap(x, y)
-        if fc is not None:
-            valeurs["FC"] = fc
+        _colonne_resiliente(valeurs, erreurs, "FC", "landschap traditioneel_landschap", lambda: self._landschap.traditioneel_landschap(x, y))
 
         # -- Nature -----------------------------------------------------
         for lettre, methode in (
@@ -244,72 +329,54 @@ class ResolveurBE:
             ("FD", self._natuur.beheergebied_natura2000_soorten),
             ("FE", self._natuur.bosreservaat),
         ):
-            v = methode(x, y)
-            if v is not None:
-                valeurs[lettre] = v
+            _colonne_resiliente(valeurs, erreurs, lettre, f"natuur {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Bodem (érosion) ---------------------------------------------
         for lettre, methode in (
             ("EL", self._bodem.potentiele_bodemerosie), ("EI", self._bodem.andere_erosiegerelateerde_gronden),
         ):
-            v = methode(x, y)
-            if v is not None:
-                valeurs[lettre] = v
+            _colonne_resiliente(valeurs, erreurs, lettre, f"bodem {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Seveso -------------------------------------------------------
         for lettre, methode in (
             ("EU", self._seveso.seveso_inrichting), ("EV", self._seveso.seveso_consultatiezone),
         ):
-            v = methode(x, y)
-            if v is not None:
-                valeurs[lettre] = v
+            _colonne_resiliente(valeurs, erreurs, lettre, f"seveso {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Steunzone / Brownfield ---------------------------------------
         for lettre, methode in (
             ("ET", self._steunzone_brownfield.steunzone),
             ("ES", self._steunzone_brownfield.brownfieldconvenant),
         ):
-            v = methode(x, y)
-            if v is not None:
-                valeurs[lettre] = v
+            _colonne_resiliente(valeurs, erreurs, lettre, f"steunzone {lettre}", lambda methode=methode: methode(x, y))
 
         # -- OVAM (pollution des sols, un seul parmi 6) -------------------
         # Sûr à 100% : le service a déjà un palier de repli explicite
         # "GE" pour l'absence de feature (voir wfs_ovam_service.py), donc
-        # `colonne_ovam` est None UNIQUEMENT sur une vraie erreur réseau.
+        # une réponse SANS exception est toujours exploitable -- seule
+        # une vraie exception réseau/API marque le groupe "ERREUR".
         bodem_verontr = tuple(l for l, i in COLONNES_BE.items() if i["groupe"] == "bodem_verontreiniging")
-        colonne_ovam = self._ovam.colonne_bodemverontreiniging(x, y)
-        _un_parmi(valeurs, bodem_verontr, {colonne_ovam} if colonne_ovam else None)
+        _un_parmi_resilient(valeurs, erreurs, bodem_verontr, "OVAM bodemverontreiniging", lambda: self._ovam.colonne_bodemverontreiniging(x, y))
 
         # -- Grondverschuivingen -----------------------------------------
         for lettre, methode in (
             ("EJ", self._grondverschuiving.gekarteerde_grondverschuiving),
             ("EK", self._grondverschuiving.gevoeligheid_grondverschuiving),
         ):
-            v = methode(x, y)
-            if v is not None:
-                valeurs[lettre] = v
+            _colonne_resiliente(valeurs, erreurs, lettre, f"grondverschuiving {lettre}", lambda methode=methode: methode(x, y))
 
-        v = self._grondwaterwinning.grondwaterwingebied(x, y)
-        if v is not None:
-            valeurs["EA"] = v
+        _colonne_resiliente(valeurs, erreurs, "EA", "grondwaterwinning", lambda: self._grondwaterwinning.grondwaterwingebied(x, y))
 
         afstroom_colonnes = tuple(l for l, i in COLONNES_BE.items() if i["groupe"] == "erosion_afstroming")
-        colonne_afstr = self._afstromingskaart.colonne_afstromingskaart(x, y)
-        _un_parmi(valeurs, afstroom_colonnes, {colonne_afstr} if colonne_afstr else None)
+        _un_parmi_resilient(valeurs, erreurs, afstroom_colonnes, "afstromingskaart", lambda: self._afstromingskaart.colonne_afstromingskaart(x, y))
 
-        v = self._advieskaart.watertoets(x, y)
-        if v is not None:
-            valeurs["EM"] = v
+        _colonne_resiliente(valeurs, erreurs, "EM", "advieskaart watertoets", lambda: self._advieskaart.watertoets(x, y))
 
         # -- DE / DV / EB : aucune source live trouvée malgré recherche
         # approfondie (voir wfs_watertoets_service.py) -- "N" partout,
         # SANS couleur distinctive, sur demande explicite du 2026-09-17
-        # ("met les tous N sans colorer le fond"). BUG corrigé le
-        # 2026-09-18 : cette règle n'avait été appliquée qu'en patch
-        # direct sur un fichier déjà écrit, jamais ici dans le code --
-        # toute commune traitée depuis laissait ces 3 colonnes VIDES
-        # (confirmé en direct sur Lille, 2275).
+        # ("met les tous N sans colorer le fond"). Valeur STRUCTURELLE
+        # (pas un appel réseau) -- jamais "ERREUR", rien à retenter ici.
         valeurs["DE"] = "N"
         valeurs["DV"] = "N"
         valeurs["EB"] = "N"
@@ -321,9 +388,10 @@ class ResolveurBE:
         # écrit "/" partout, même convention que le gabarit officiel pour
         # une cellule non applicable (voir ligne 4 des en-têtes). Le
         # vrai remplissage RUP se fait à la main sur la feuille "RUP"
-        # dédiée (lien + texte libre par niveau), pas ici.
+        # dédiée (lien + texte libre par niveau), pas ici. Valeur
+        # STRUCTURELLE (pas un appel réseau) -- jamais "ERREUR".
         for lettre, info in COLONNES_BE.items():
             if info["groupe"] in ("rup_region", "rup_province", "rup_commune"):
                 valeurs[lettre] = "/"
 
-        return valeurs
+        return valeurs, erreurs

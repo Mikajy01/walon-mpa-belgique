@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pyproj
 
@@ -43,7 +43,14 @@ _RE_MEMBER = re.compile(
 )
 _RE_POSLIST = re.compile(r"<gml:posList>([^<]*)</gml:posList>")
 
+# nis+section+numéro (ex. "44045D0247") -- base commune à plusieurs
+# parcelles "sœurs" (bis-lettres différentes, ex. "247G"/"247S"/"247T")
+# issues de la subdivision d'un même terrain d'origine -- voir
+# `_base_parcelle`/`get_parcelle_et_voisines`.
+_RE_REFERENCE = re.compile(r"^(\d{5}[A-Z]\d{4})/(\d{2})([A-Z_])(\d{3})$")
+
 _TRANSFORMER_L72_VERS_4258 = pyproj.Transformer.from_crs("EPSG:31370", "EPSG:4258", always_xy=True)
+_TRANSFORMER_4258_VERS_L72 = pyproj.Transformer.from_crs("EPSG:4258", "EPSG:31370", always_xy=True)
 
 # Marges (m) d'élargissement progressif du bbox de recherche — la
 # parcelle attendue est censée être TRÈS proche du point de départ (une
@@ -58,6 +65,24 @@ def lambert72_vers_4258(x: float, y: float) -> tuple[float, float]:
     position d'adresse du registre flamand (voir `adressen_service.py`)."""
     lon, lat = _TRANSFORMER_L72_VERS_4258.transform(x, y)
     return lon, lat
+
+
+def vers_lambert72(lon: float, lat: float) -> tuple[float, float]:
+    """Reprojection INVERSE de `lambert72_vers_4258` -- nécessaire pour
+    positionner (Lambert 72, comme partout ailleurs dans le pipeline) une
+    parcelle "sœur" SANS adresse propre à partir du centroïde de SA
+    PROPRE géométrie (EPSG:4258, voir `_parser_geometrie`), voir
+    `decouverte_service.py::_adresse_synthetique_sans_adresse`."""
+    x, y = _TRANSFORMER_4258_VERS_L72.transform(lon, lat)
+    return x, y
+
+
+def _base_parcelle(reference: str) -> Optional[str]:
+    """"44045D0247/00G000" -> "44045D0247" -- `None` si `reference` ne
+    suit pas le motif attendu (jamais deviné, voir
+    `excel_service.py::_RE_CAPAKEY_COMPLET`, même motif)."""
+    m = _RE_REFERENCE.match(reference)
+    return m.group(1) if m else None
 
 
 class CadastreService:
@@ -78,11 +103,37 @@ class CadastreService:
         (`_MARGES_RECHERCHE_M`) si la référence n'apparaît pas dans les
         premiers résultats ; renvoie `None` (jamais deviné) si elle reste
         introuvable après la marge la plus large."""
+        parcelle, _voisines = self.get_parcelle_et_voisines(reference, lat, lon)
+        return parcelle
+
+    def get_parcelle_et_voisines(
+        self, reference: str, lat: float, lon: float,
+    ) -> Tuple[Optional[Parcelle], List[Parcelle]]:
+        """Comme `get_parcelle`, mais renvoie EN PLUS les parcelles
+        "sœurs" trouvées dans le MÊME bbox que `reference` (jamais un
+        bbox séparé, uniquement des parcelles déjà rapportées par la
+        requête qui a trouvé `reference`) : même référence de BASE
+        (nis+section+numéro, voir `_base_parcelle`) mais un bis-lettre
+        différent -- écart réel trouvé en investigation live (Mespelhoek
+        7, Lokeren, 2026-09-19) : "247G" a une adresse officielle, mais
+        "247S"/"247T" (visibles sur geopunt.be juste à côté) N'EN ONT
+        AUCUNE dans le registre -- très probablement des subdivisions du
+        même terrain (jardin/annexe). Décision explicite de l'utilisateur
+        (2026-09-19) : ces parcelles SANS adresse doivent quand même être
+        traitées (la checklist est par PARCELLE, pas par adresse) --
+        voir `decouverte_service.py` pour la suite (adresse synthétique
+        "/"). Liste vide si `reference` n'a aucune sœur dans ce bbox
+        (cas normal, la plupart des parcelles n'ont pas de subdivision)."""
         for marge in _MARGES_RECHERCHE_M:
             parcelles = self._chercher_par_bbox(lat, lon, marge)
-            for p in parcelles:
-                if p.reference == reference:
-                    return p
+            cible = next((p for p in parcelles if p.reference == reference), None)
+            if cible is not None:
+                base = _base_parcelle(reference)
+                voisines = (
+                    [p for p in parcelles if p.reference != reference and _base_parcelle(p.reference) == base]
+                    if base is not None else []
+                )
+                return cible, voisines
             _logger.debug(
                 "Parcelle '%s' non trouvée dans un bbox de %.0fm autour de (%.6f, %.6f) "
                 "(%d parcelle(s) vue(s)) — élargissement.", reference, marge, lat, lon, len(parcelles),
@@ -91,7 +142,7 @@ class CadastreService:
             "Parcelle '%s' introuvable près de (%.6f, %.6f) même après élargissement à %.0fm.",
             reference, lat, lon, _MARGES_RECHERCHE_M[-1],
         )
-        return None
+        return None, []
 
     def _chercher_par_bbox(self, lat: float, lon: float, marge_m: float) -> List[Parcelle]:
         url = config.CADASTRE_WFS_BASE

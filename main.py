@@ -15,11 +15,15 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import requests
+
 import config
 from services.adressen_service import AdressenService
 from services.cache_service import HttpCache
 from services.cadastre_service import CadastreService
 from services.decouverte_service import decouvrir_parcelles
+from services.erreurs_service import reessayer_cellules_erreur, tracer_cellules_erreur
+from services.exceptions import ApiServiceError
 from services.excel_service import (
     charger_classeur, ecrire_identite, ecrire_ligne, ecrire_rup,
     ecrire_zones_dynamiques_rup, feuille_principale, feuille_rup, index_colonnes_dynamiques_rup,
@@ -192,6 +196,17 @@ def executer_traitement(
         import shutil
         shutil.copyfile(Path(template), excel_path)
 
+    # Retente D'ABORD les cellules "ERREUR" laissées par un run précédent (échec
+    # réseau/API ponctuel, jamais une vraie réponse négative -- voir
+    # resolveur_service.py, décision du 2026-09-19) avant de traiter des rues
+    # neuves -- même esprit que walon-map-france-cloud (bouton "Retraiter les
+    # erreurs"), mais automatique ici (pas de mode séparé) : le fichier
+    # `config.CELLULES_A_REVISITER_PATH` est partagé entre toutes les communes,
+    # donc ce run ne retente que celles qui appartiennent à CE fichier.
+    n_repare = reessayer_cellules_erreur(excel_path, config.CELLULES_A_REVISITER_PATH, resolveur)
+    if n_repare:
+        _logger.info("%d cellule(s) \"ERREUR\" réparée(s) avant de commencer ce run.", n_repare)
+
     rues_liste = [r.strip() for r in re.split(r"[,\n]", rues) if r.strip()]
 
     deadline = datetime.now(timezone.utc) + timedelta(hours=budget_heures)
@@ -222,7 +237,18 @@ def executer_traitement(
         deja_ecrits = lire_capakeys_deja_ecrits(ws)
         capakeys_vers_lignes_rup = lire_capakeys_vers_lignes(ws_rup) if ws_rup is not None else {}
         _logger.info("Découverte de '%s' (%s)...", rue, commune)
-        parcelles = decouvrir_parcelles(commune, rue, adressen, cadastre)
+        try:
+            parcelles = decouvrir_parcelles(commune, rue, adressen, cadastre)
+        except Exception as exc:  # noqa: BLE001 -- une rue entière ne doit jamais faire planter
+            # tout le run (les autres rues déjà traitées restent sauvegardées) -- incident réel
+            # du 2026-09-19 : le cadastre fédéral belge (host connu pour être capricieux) a fait
+            # planter la découverte d'adresses SANS que ce soit rattrapé nulle part avant.
+            _logger.warning(
+                "Découverte de '%s' (%s) a échoué (%s: %s) -- rue SAUTÉE pour ce run, relance le "
+                "même traitement plus tard pour la retenter.",
+                rue, commune, type(exc).__name__, exc,
+            )
+            continue
         _logger.info("'%s' : %d parcelle(s) trouvée(s), %d déjà écrite(s).", rue, len(parcelles), len(deja_ecrits))
 
         n_ecrites_rue = 0
@@ -257,12 +283,21 @@ def executer_traitement(
                 incomplet = True
                 break
             a = p.adresses[0]
-            valeurs = resolveur.resoudre(a.x, a.y)
+            valeurs, erreurs_colonnes = resolveur.resoudre(a.x, a.y)
             row = trouver_premiere_ligne_vide(ws)
             ecrire_ligne(
                 ws, row, commune=commune, code_postal=code_postal, rue=rue,
                 numero=a.huisnummer, capakey=capakey_court, valeurs=valeurs,
             )
+            if erreurs_colonnes:
+                # Tracé pour un nouvel essai automatique au run suivant (voir
+                # l'appel à `reessayer_cellules_erreur` en tête de fonction) --
+                # jamais silencieux, jamais confondu avec un vrai "N".
+                tracer_cellules_erreur(
+                    config.CELLULES_A_REVISITER_PATH, excel_path=excel_path, commune=commune,
+                    code_postal=code_postal, rue=rue, numero=a.huisnummer, capakey=capakey_court,
+                    x=a.x, y=a.y, colonnes=erreurs_colonnes,
+                )
             if ws_rup is not None:
                 # Même ligne que la feuille principale. Décision du
                 # 2026-09-16 : pas de classement dans les ~25 catégories
@@ -281,7 +316,21 @@ def executer_traitement(
                 for niveau, methode in (
                     ("region", rup.rup_region), ("province", rup.rup_province), ("commune", rup.rup_commune),
                 ):
-                    infos = methode(a.x, a.y)
+                    try:
+                        infos = methode(a.x, a.y)
+                    except (requests.exceptions.RequestException, ApiServiceError) as exc:
+                        # Erreur réseau/API (voir resolveur_service.py) -- écrit "ERREUR"
+                        # plutôt que "/" pour ne jamais la confondre avec une vraie absence
+                        # de RUP à ce niveau. PAS retentée automatiquement (contrairement aux
+                        # colonnes de la feuille principale, voir erreurs_service.py) -- la
+                        # feuille RUP n'a pas la même granularité colonne-par-colonne, à
+                        # revérifier manuellement si "ERREUR" apparaît ici.
+                        _logger.warning(
+                            "RUP %s (ligne %d) : erreur réseau/API (%s) -- marqué \"ERREUR\".",
+                            niveau, row, exc,
+                        )
+                        ecrire_rup(ws_rup, row, niveau, lien="ERREUR", texte="ERREUR")
+                        continue
                     if not infos:
                         # Aucun RUP de ce niveau à ce point -- "/" plutôt
                         # que vide (demande du 2026-09-17 : jamais de
@@ -327,7 +376,19 @@ def executer_traitement(
                 for niveau, methode in (
                     ("region", rup.rup_region), ("province", rup.rup_province), ("commune", rup.rup_commune),
                 ):
-                    infos = methode(x, y)
+                    try:
+                        infos = methode(x, y)
+                    except (requests.exceptions.RequestException, ApiServiceError) as exc:
+                        # Une seule ligne/niveau en échec ne doit jamais faire perdre la
+                        # réconciliation des AUTRES lignes déjà accumulées (voir la boucle
+                        # englobante) -- juste sautée ici (les colonnes dynamiques RUP de
+                        # cette ligne resteront "N" par défaut pour ce niveau, pas trackée
+                        # pour un nouvel essai automatique, limite connue).
+                        _logger.warning(
+                            "Réconciliation RUP %s (ligne %d) : erreur réseau/API (%s) -- sautée.",
+                            niveau, row, exc,
+                        )
+                        continue
                     for info in infos:
                         if info.svnaam:
                             niveaux_par_svnaam.setdefault(info.svnaam, set()).add(niveau)

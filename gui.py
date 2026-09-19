@@ -109,6 +109,23 @@ class App(ctk.CTk):
         self.checkbox_debug = ctk.CTkCheckBox(cadre_lieu, text="Logs détaillés (debug)")
         self.checkbox_debug.grid(row=0, column=6, padx=(15, 5), pady=5)
 
+        cadre_sortie = ctk.CTkFrame(onglet)
+        cadre_sortie.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(cadre_sortie, text="Dossier de sortie :").pack(side="left", padx=5, pady=5)
+        self.entry_dossier_sortie = ctk.CTkEntry(cadre_sortie)
+        self.entry_dossier_sortie.insert(0, str(config.STATE_DIR))
+        self.entry_dossier_sortie.pack(side="left", fill="x", expand=True, padx=5, pady=5)
+        ctk.CTkButton(
+            cadre_sortie, text="Parcourir…", width=100, command=self._choisir_dossier_sortie,
+        ).pack(side="left", padx=5, pady=5)
+        ctk.CTkLabel(
+            onglet,
+            text="Le nom du fichier Excel est calculé automatiquement (code postal + commune) et créé dans ce "
+            "dossier -- s'il existe déjà, le traitement continue dedans (les lignes déjà écrites sont sautées) "
+            "plutôt que de l'écraser.",
+            text_color=("gray30", "gray70"), wraplength=700, justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 5))
+
         ctk.CTkLabel(
             onglet, text="Rues à traiter (une par ligne, TOUJOURS obligatoire -- pas de découverte "
             "automatique de toute la commune) :",
@@ -205,17 +222,32 @@ class App(ctk.CTk):
 
     # -- Onglet Traitement ------------------------------------------------
 
+    def _choisir_dossier_sortie(self) -> None:
+        dossier = filedialog.askdirectory(
+            initialdir=self.entry_dossier_sortie.get().strip() or str(config.STATE_DIR),
+            title="Choisir le dossier de sortie",
+        )
+        if dossier:
+            self.entry_dossier_sortie.delete(0, "end")
+            self.entry_dossier_sortie.insert(0, dossier)
+
     def _valider_formulaire(self) -> Optional[dict]:
         commune = self.entry_commune.get().strip()
         code_postal = self.entry_code_postal.get().strip()
         rues_brut = self.zone_rues.get("1.0", "end").strip()
         budget_str = self.entry_budget_heures.get().strip()
+        dossier_sortie = self.entry_dossier_sortie.get().strip() or str(config.STATE_DIR)
 
         if not commune or not code_postal:
             messagebox.showerror(APP_TITLE, "Commune et code postal sont obligatoires.")
             return None
         if not rues_brut:
             messagebox.showerror(APP_TITLE, "Indiquez au moins une rue à traiter (une par ligne).")
+            return None
+        try:
+            Path(dossier_sortie).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(APP_TITLE, f"Dossier de sortie invalide : {exc}")
             return None
         try:
             budget_heures = float(budget_str) if budget_str else 5.5
@@ -239,6 +271,7 @@ class App(ctk.CTk):
             "rues": ",".join(l.strip() for l in rues_brut.splitlines() if l.strip()),
             "debug": bool(self.checkbox_debug.get()),
             "budget_heures": budget_heures,
+            "state_dir": dossier_sortie,
         }
 
     def _lancer_traitement(self) -> None:
@@ -249,6 +282,7 @@ class App(ctk.CTk):
             return
 
         self._en_cours = True
+        self._dernier_dossier_sortie = parametres["state_dir"]
         self.bouton_lancer.configure(state="disabled", text="Traitement en cours…")
         self.bouton_verifier.configure(state="disabled")
         self.barre_progression.start()
@@ -266,7 +300,7 @@ class App(ctk.CTk):
             code_retour = executer_traitement(
                 commune=parametres["commune"], code_postal=parametres["code_postal"],
                 rues=parametres["rues"], template=str(config.TEMPLATE_PATH),
-                state_dir=str(config.STATE_DIR), cache_dir=str(config.CACHE_DIR),
+                state_dir=parametres["state_dir"], cache_dir=str(config.CACHE_DIR),
                 logs_dir=str(config.BASE_DIR / "logs"), debug=parametres["debug"],
                 budget_heures=parametres["budget_heures"],
             )
@@ -294,7 +328,9 @@ class App(ctk.CTk):
             )
         else:
             self.label_statut.configure(text="Traitement terminé.")
-            messagebox.showinfo(APP_TITLE, "Traitement terminé -- voir le fichier dans le dossier state/.")
+            messagebox.showinfo(
+                APP_TITLE, f"Traitement terminé -- voir le fichier dans :\n{self._dernier_dossier_sortie}",
+            )
 
     # -- Onglet Vérifier des rues -----------------------------------------
 

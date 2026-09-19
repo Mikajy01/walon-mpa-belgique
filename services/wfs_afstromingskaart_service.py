@@ -18,6 +18,10 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+import requests
+
+from services.exceptions import ApiServiceError
+
 from services.http_client import HttpClient
 from utils.logger import get_logger
 
@@ -47,6 +51,13 @@ class WfsAfstromingskaartService:
         }
         try:
             texte = self._http.get_text(_IMAGE_SERVER_BASE, params, service_key="afstromingskaart_be")
+        except (requests.exceptions.RequestException, ApiServiceError):
+            # Erreur reseau/API (jamais une reponse HTTP valide sans resultat) -- NE JAMAIS
+            # avaler ici en None/"N" : doit remonter jusqu'au resolveur pour etre marquee
+            # "ERREUR" et retentee au run suivant (voir resolveur_service.py, decision du
+            # 2026-09-19 -- une degradation silencieuse en "N" rendait ces cellules fausses
+            # de facon PERMANENTE, jamais retentees une fois la ligne ecrite).
+            raise
         except Exception as exc:  # noqa: BLE001 — une couche indisponible ne doit jamais faire échouer tout le traitement de la parcelle
             _logger.warning("Couche 'Afstroomlijnen' indisponible (x=%s, y=%s) : %s", x, y, exc)
             return None
