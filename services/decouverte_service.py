@@ -40,7 +40,8 @@ from models.adresse import AdresseBE
 from models.parcelle import Parcelle
 from services.adressen_service import AdressenService
 from services.cadastre_service import CadastreService, lambert72_vers_4258, vers_lambert72
-from utils.geometrie import centroide_geometrie
+from services.decouverte_geometrique_service import DecouverteGeometrique
+from utils.geometrie import point_interieur
 from utils.logger import get_logger
 
 _logger = get_logger("services.decouverte_service")
@@ -59,16 +60,20 @@ class ParcelleTrouvee:
 
 def decouvrir_parcelles(
     gemeentenaam: str, straatnaam: str, adressen: AdressenService, cadastre: CadastreService,
+    geometrique: Optional[DecouverteGeometrique] = None,
 ) -> List[ParcelleTrouvee]:
     """Découvre et ordonne les parcelles de `straatnaam` (`gemeentenaam`) :
     un côté d'abord (numéros impairs par convention, voir plus bas), puis
     l'autre, chacun trié par numéro croissant, chaque parcelle adressée
     immédiatement suivie de ses éventuelles sœurs sans adresse propre --
-    voir le docstring du module."""
+    voir le docstring du module. Si `geometrique` est fourni, les parcelles
+    qui bordent la rue SANS aucune adresse (champs, digues) sont ajoutées à
+    la fin, côté gauche puis droit -- voir `decouverte_geometrique_service`."""
     adresses = adressen.lister_adresses(gemeentenaam, straatnaam)
     if not adresses:
         _logger.warning("Aucune adresse trouvée pour '%s' (%s).", straatnaam, gemeentenaam)
-        return []
+        if geometrique is None:
+            return []
 
     par_parcelle: Dict[Tuple[str, ...], List[AdresseBE]] = {}
     for a in adresses:
@@ -149,6 +154,30 @@ def decouvrir_parcelles(
     for entree in trouvees:
         resultat.append(entree)
         resultat.extend(entree.voisines_sans_adresse)
+
+    if geometrique is not None:
+        try:
+            le_long = geometrique.parcelles_le_long(gemeentenaam, straatnaam)
+        except Exception as exc:  # noqa: BLE001 -- ne fait jamais perdre les parcelles déjà trouvées par adresse
+            _logger.warning(
+                "Découverte géométrique de '%s' (%s) a échoué (%s: %s) -- seules les parcelles liées à une "
+                "adresse sont retournées pour ce run ; relance plus tard pour retenter.",
+                straatnaam, gemeentenaam, type(exc).__name__, exc,
+            )
+            le_long = []
+        n_geo = 0
+        for pl in le_long:
+            ref = pl.parcelle.reference
+            if ref in references_adressees or ref in references_emises:
+                continue  # déjà trouvée par adresse (ou comme sœur) -- jamais dupliquée
+            references_emises.add(ref)
+            adresse_synth = AdresseBE(
+                object_id="", huisnummer="/", straatnaam=straatnaam, gemeentenaam=gemeentenaam,
+                x=pl.x, y=pl.y, capakeys=[ref],
+            )
+            resultat.append(ParcelleTrouvee(parcelle=pl.parcelle, adresses=[adresse_synth], cote="geometrie"))
+            n_geo += 1
+        _logger.info("'%s' : %d parcelle(s) supplémentaire(s) trouvée(s) par la géométrie de la rue.", straatnaam, n_geo)
     return resultat
 
 
@@ -177,7 +206,7 @@ def _adresse_synthetique_sans_adresse(
     (voir `cadastre_service.py::_parser_geometrie`)."""
     if voisine.geometry is None:
         return None
-    lon, lat = centroide_geometrie(voisine.geometry)
+    lon, lat = point_interieur(voisine.geometry)
     x, y = vers_lambert72(lon, lat)
     return AdresseBE(
         object_id="", huisnummer="/", straatnaam=straatnaam, gemeentenaam=gemeentenaam,

@@ -74,3 +74,32 @@ def point_dans_geometrie(lon: float, lat: float, geometry: Dict) -> bool:
     else:
         return False
     return any(_point_dans_anneau(lon, lat, poly[0]) for poly in polygones)
+
+
+def point_interieur(geometry: Dict) -> Tuple[float, float]:
+    """Un point GARANTI (autant que possible) à l'intérieur de `geometry`.
+    Le centroïde moyen des sommets (`centroide_geometrie`) peut tomber HORS
+    d'une parcelle allongée ou concave (champ en lanière, parcelle en L) --
+    or les couches WFS thématiques sont interrogées en ce point, un point
+    hors de la parcelle donnerait la réponse du voisin. Essaie le centroïde,
+    puis une grille 15x15 sur l'emprise (le point intérieur le plus proche du
+    centroïde) ; retombe sur le centroïde si rien ne convient (jamais
+    d'exception : cas dégénéré)."""
+    cx, cy = centroide_geometrie(geometry)
+    if point_dans_geometrie(cx, cy, geometry):
+        return cx, cy
+    gtype = geometry.get("type")
+    anneau = geometry["coordinates"][0] if gtype == "Polygon" else geometry["coordinates"][0][0]
+    xs = [c[0] for c in anneau]
+    ys = [c[1] for c in anneau]
+    n = 15
+    meilleur = None
+    for i in range(1, n):
+        for j in range(1, n):
+            x = min(xs) + (max(xs) - min(xs)) * i / n
+            y = min(ys) + (max(ys) - min(ys)) * j / n
+            if point_dans_geometrie(x, y, geometry):
+                d = (x - cx) ** 2 + (y - cy) ** 2
+                if meilleur is None or d < meilleur[0]:
+                    meilleur = (d, x, y)
+    return (meilleur[1], meilleur[2]) if meilleur else (cx, cy)

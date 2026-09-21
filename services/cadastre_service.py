@@ -144,6 +144,14 @@ class CadastreService:
         )
         return None, []
 
+    def parcelles_autour(self, lat: float, lon: float, marge_m: float) -> List[Parcelle]:
+        """Toutes les parcelles du bbox carré de demi-côté `marge_m` autour de
+        `(lat, lon)` (EPSG:4258) -- utilisé par la découverte géométrique
+        (`decouverte_geometrique_service.py`). ATTENTION : la requête est
+        plafonnée à 200 entités (`count`), une réponse pleine peut donc être
+        tronquée -- à l'appelant de le détecter (`len(...) >= 200`)."""
+        return self._chercher_par_bbox(lat, lon, marge_m)
+
     def _chercher_par_bbox(self, lat: float, lon: float, marge_m: float) -> List[Parcelle]:
         url = config.CADASTRE_WFS_BASE
         params = {

@@ -118,6 +118,23 @@ class App(ctk.CTk):
         ctk.CTkButton(
             cadre_sortie, text="Parcourir…", width=100, command=self._choisir_dossier_sortie,
         ).pack(side="left", padx=5, pady=5)
+        self.checkbox_geometrie = ctk.CTkCheckBox(
+            onglet,
+            text="Découverte géométrique : ajouter aussi les parcelles qui bordent la rue SANS adresse "
+            "(champs, digues, rues sans numéros)",
+        )
+        self.checkbox_geometrie.select()
+        self.checkbox_geometrie.pack(anchor="w", padx=10, pady=(0, 2))
+        cadre_rayon = ctk.CTkFrame(onglet, fg_color="transparent")
+        cadre_rayon.pack(anchor="w", padx=10, pady=(0, 5))
+        ctk.CTkLabel(cadre_rayon, text="Rayon autour de la route (m) :").pack(side="left", padx=(20, 5))
+        self.entry_rayon_geometrique = ctk.CTkEntry(cadre_rayon, width=60)
+        self.entry_rayon_geometrique.insert(0, "10")
+        self.entry_rayon_geometrique.pack(side="left")
+        ctk.CTkLabel(
+            cadre_rayon, text="10 = parcelles riveraines ; 50 = jusqu'à 50 m (champs derrière la route)",
+            text_color=("gray30", "gray70"),
+        ).pack(side="left", padx=10)
         ctk.CTkLabel(
             onglet,
             text="Le nom du fichier Excel est calculé automatiquement (code postal + commune) et créé dans ce "
@@ -250,6 +267,13 @@ class App(ctk.CTk):
             messagebox.showerror(APP_TITLE, f"Dossier de sortie invalide : {exc}")
             return None
         try:
+            rayon_geometrique_m = float(self.entry_rayon_geometrique.get().strip() or "10")
+            if rayon_geometrique_m <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(APP_TITLE, "Le rayon autour de la route doit être un nombre de mètres > 0.")
+            return None
+        try:
             budget_heures = float(budget_str) if budget_str else 5.5
         except ValueError:
             messagebox.showerror(APP_TITLE, "Le budget de temps doit être un nombre (heures).")
@@ -272,6 +296,8 @@ class App(ctk.CTk):
             "debug": bool(self.checkbox_debug.get()),
             "budget_heures": budget_heures,
             "state_dir": dossier_sortie,
+            "decouverte_geometrique": bool(self.checkbox_geometrie.get()),
+            "rayon_geometrique_m": rayon_geometrique_m,
         }
 
     def _lancer_traitement(self) -> None:
@@ -303,6 +329,8 @@ class App(ctk.CTk):
                 state_dir=parametres["state_dir"], cache_dir=str(config.CACHE_DIR),
                 logs_dir=str(config.BASE_DIR / "logs"), debug=parametres["debug"],
                 budget_heures=parametres["budget_heures"],
+                decouverte_geometrique=parametres["decouverte_geometrique"],
+                rayon_geometrique_m=parametres["rayon_geometrique_m"],
             )
             self._message_queue.put(("done", code_retour))
         except Exception as exc:  # noqa: BLE001 -- remonté proprement au thread Tk, jamais un crash silencieux

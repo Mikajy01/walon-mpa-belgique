@@ -21,6 +21,7 @@ import config
 from services.adressen_service import AdressenService
 from services.cache_service import HttpCache
 from services.cadastre_service import CadastreService
+from services.decouverte_geometrique_service import DecouverteGeometrique
 from services.decouverte_service import decouvrir_parcelles
 from services.erreurs_service import reessayer_cellules_erreur, tracer_cellules_erreur
 from services.exceptions import ApiServiceError
@@ -49,6 +50,7 @@ from services.wfs_ovam_service import WfsOvamService
 from services.wfs_rup_service import WfsRupService
 from services.wfs_seveso_service import WfsSevesoService
 from services.wfs_steunzone_brownfield_service import WfsSteunzoneBrownfieldService
+from services.wegenregister_service import WegenregisterService
 from services.wfs_watertoets_service import WfsWatertoetsService
 from utils.logger import get_logger, setup_logging
 from utils.rate_limiter import RateLimiter
@@ -67,6 +69,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--cache-dir", default=str(config.CACHE_DIR))
     parser.add_argument("--logs-dir", default=str(config.BASE_DIR / "logs"))
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--sans-decouverte-geometrique", action="store_true",
+        help=(
+            "Désactive la découverte GÉOMÉTRIQUE (parcelles qui bordent la rue sans aucune adresse "
+            "du registre, via le tracé du Wegenregister) -- active par défaut depuis le 2026-09-21."
+        ),
+    )
+    parser.add_argument(
+        "--rayon-geometrique-m", type=float, default=10.0,
+        help=(
+            "Rayon (m) de la découverte géométrique autour de la ligne centrale de la rue : 10 (défaut) = "
+            "parcelles qui BORDENT la route ; plus grand (ex. 50) pour inclure aussi les parcelles "
+            "derrière (rues rurales dont les champs ne touchent pas tous la route)."
+        ),
+    )
     parser.add_argument(
         "--budget-heures", type=float, default=5.5,
         help=(
@@ -165,6 +182,7 @@ def _log_progres(prefixe: str, actuel: int, total: int, largeur: int = 30) -> No
 def executer_traitement(
     *, commune: str, code_postal: str, rues: str, template: str, state_dir: str,
     cache_dir: str, logs_dir: str, debug: bool = False, budget_heures: float = 5.5,
+    decouverte_geometrique: bool = True, rayon_geometrique_m: float = 10.0,
 ) -> int:
     """Cœur du pipeline, RÉUTILISABLE (voir gui.py) -- extrait de `main()`
     (2026-09-18) pour que le GUI l'appelle directement avec des
@@ -187,6 +205,10 @@ def executer_traitement(
         WfsAfstromingskaartService(http), WfsAdvieskaartService(http), WfsRuilverkavelingService(http),
     )
     rup = WfsRupService(http)
+    geometrique = (
+        DecouverteGeometrique(WegenregisterService(http), cadastre, rayon_m=rayon_geometrique_m)
+        if decouverte_geometrique else None
+    )
 
     state_dir_p = Path(state_dir)
     state_dir_p.mkdir(parents=True, exist_ok=True)
@@ -238,7 +260,7 @@ def executer_traitement(
         capakeys_vers_lignes_rup = lire_capakeys_vers_lignes(ws_rup) if ws_rup is not None else {}
         _logger.info("Découverte de '%s' (%s)...", rue, commune)
         try:
-            parcelles = decouvrir_parcelles(commune, rue, adressen, cadastre)
+            parcelles = decouvrir_parcelles(commune, rue, adressen, cadastre, geometrique)
         except Exception as exc:  # noqa: BLE001 -- une rue entière ne doit jamais faire planter
             # tout le run (les autres rues déjà traitées restent sauvegardées) -- incident réel
             # du 2026-09-19 : le cadastre fédéral belge (host connu pour être capricieux) a fait
@@ -436,7 +458,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     return executer_traitement(
         commune=args.commune, code_postal=args.code_postal, rues=args.rues, template=args.template,
         state_dir=args.state_dir, cache_dir=args.cache_dir, logs_dir=args.logs_dir, debug=args.debug,
-        budget_heures=args.budget_heures,
+        budget_heures=args.budget_heures, decouverte_geometrique=not args.sans_decouverte_geometrique,
+        rayon_geometrique_m=args.rayon_geometrique_m,
     )
 
 
