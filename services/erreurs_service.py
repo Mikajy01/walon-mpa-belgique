@@ -145,3 +145,22 @@ def reessayer_cellules_erreur(excel_path: Path, chemin_revisite: Path, resolveur
         excel_path.name, n_repare, len(lignes_restantes),
     )
     return n_repare
+
+
+def purger_cellules_fichier(chemin_revisite: Path, excel_path: Path) -> int:
+    """Retire du suivi toutes les cellules "ERREUR" trackées pour `excel_path` --
+    à appeler quand ce fichier est archivé puis recréé de zéro (option
+    `--repartir-de-zero`) : ses anciennes lignes n'existent plus, les retenter
+    échouerait à jamais ("ligne disparue"). Renvoie le nombre de lignes retirées."""
+    if not chemin_revisite.exists():
+        return 0
+    with chemin_revisite.open(newline="", encoding="utf-8") as f:
+        lignes = list(csv.DictReader(f))
+    gardees = [l for l in lignes if l["excel_path"] != str(excel_path)]
+    if len(gardees) == len(lignes):
+        return 0
+    with chemin_revisite.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_CHAMPS)
+        writer.writeheader()
+        writer.writerows(gardees)
+    return len(lignes) - len(gardees)

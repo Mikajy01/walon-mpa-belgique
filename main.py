@@ -23,7 +23,7 @@ from services.cache_service import HttpCache
 from services.cadastre_service import CadastreService
 from services.decouverte_geometrique_service import DecouverteGeometrique
 from services.decouverte_service import decouvrir_parcelles
-from services.erreurs_service import reessayer_cellules_erreur, tracer_cellules_erreur
+from services.erreurs_service import purger_cellules_fichier, reessayer_cellules_erreur, tracer_cellules_erreur
 from services.exceptions import ApiServiceError
 from services.excel_service import (
     charger_classeur, ecrire_identite, ecrire_ligne, ecrire_rup,
@@ -69,6 +69,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--cache-dir", default=str(config.CACHE_DIR))
     parser.add_argument("--logs-dir", default=str(config.BASE_DIR / "logs"))
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--repartir-de-zero", action="store_true",
+        help=(
+            "Archive le fichier d'état existant (…backup-AAAAMMJJ-HHMMSS-avant-reset.xlsx) et repart d'un "
+            "fichier vide : nécessaire pour appliquer l'ordre 'un côté puis l'autre' à TOUTE la rue sur une "
+            "commune déjà remplie. À utiliser UNIQUEMENT au premier run ; si celui-ci s'arrête avant la fin, "
+            "relancer SANS cette option pour reprendre."
+        ),
+    )
     parser.add_argument(
         "--sans-decouverte-geometrique", action="store_true",
         help=(
@@ -182,7 +191,7 @@ def _log_progres(prefixe: str, actuel: int, total: int, largeur: int = 30) -> No
 def executer_traitement(
     *, commune: str, code_postal: str, rues: str, template: str, state_dir: str,
     cache_dir: str, logs_dir: str, debug: bool = False, budget_heures: float = 5.5,
-    decouverte_geometrique: bool = True, rayon_geometrique_m: float = 10.0,
+    decouverte_geometrique: bool = True, rayon_geometrique_m: float = 10.0, repartir_de_zero: bool = False,
 ) -> int:
     """Cœur du pipeline, RÉUTILISABLE (voir gui.py) -- extrait de `main()`
     (2026-09-18) pour que le GUI l'appelle directement avec des
@@ -213,6 +222,18 @@ def executer_traitement(
     state_dir_p = Path(state_dir)
     state_dir_p.mkdir(parents=True, exist_ok=True)
     excel_path = chemin_etat_commune(state_dir_p, commune, code_postal)
+    if repartir_de_zero and excel_path.exists():
+        # Archive l'ancien fichier (trace datée, jamais un écrasement silencieux) puis repart
+        # du gabarit : seul moyen d'appliquer l'ordre "un côté puis l'autre" à TOUTE la rue
+        # sur une commune déjà remplie (sinon les nouvelles lignes vont en fin de feuille).
+        archive = excel_path.with_name(f"{excel_path.stem}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}-avant-reset.xlsx")
+        excel_path.rename(archive)
+        n_purgees = purger_cellules_fichier(config.CELLULES_A_REVISITER_PATH, excel_path)
+        _logger.warning(
+            "REPARTIR DE ZÉRO : ancien fichier archivé -> %s (%d cellule(s) ERREUR retirée(s) du suivi). "
+            "Si CE run s'arrête avant la fin, relance-le SANS cette option pour reprendre.",
+            archive.name, n_purgees,
+        )
     if not excel_path.exists():
         _logger.info("Aucun état existant pour '%s', amorçage depuis le gabarit (%s).", commune, excel_path)
         import shutil
@@ -459,7 +480,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         commune=args.commune, code_postal=args.code_postal, rues=args.rues, template=args.template,
         state_dir=args.state_dir, cache_dir=args.cache_dir, logs_dir=args.logs_dir, debug=args.debug,
         budget_heures=args.budget_heures, decouverte_geometrique=not args.sans_decouverte_geometrique,
-        rayon_geometrique_m=args.rayon_geometrique_m,
+        rayon_geometrique_m=args.rayon_geometrique_m, repartir_de_zero=args.repartir_de_zero,
     )
 
 

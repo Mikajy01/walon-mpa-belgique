@@ -153,6 +153,40 @@ def _distance_min_aux_aretes(geom_l72: Dict, aretes: List[Tuple[float, float, fl
     return meilleur
 
 
+def _projeter(px: float, py: float, aretes: List[Tuple[float, float, float, float, float]]) -> Tuple[float, float, float]:
+    """Point de la ligne centrale le plus proche de `(px, py)` :
+    `(distance, abscisse le long du tracé, produit vectoriel)` -- le signe du
+    produit vectoriel donne le côté (>= 0 gauche, < 0 droite du sens de parcours)."""
+    meilleur = (math.inf, 0.0, 0.0)
+    for ax, ay, bx, by, off in aretes:
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+        d = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+        if d < meilleur[0]:
+            meilleur = (d, off + t * math.sqrt(l2), dx * (py - ay) - dy * (px - ax))
+    return meilleur
+
+
+@dataclass
+class Trace:
+    """Ligne centrale chaînée d'une rue (Wegenregister) : sert à donner à
+    N'IMPORTE QUEL point (adresse ou parcelle sans adresse) un côté et une
+    abscisse le long de la rue -- base de l'ordre "un côté d'abord, puis
+    l'autre, dans l'ordre d'apparition" pour TOUTES les parcelles, avec ou sans
+    numéro de maison (demande du 2026-09-21)."""
+    id_rue: str
+    chemin: List[List[Tuple[float, float]]]
+    aretes: List[Tuple[float, float, float, float, float]]  # ax, ay, bx, by, abscisse de départ
+    longueur: float
+    n_segments: int
+
+    def position(self, x: float, y: float) -> Tuple[str, float, float]:
+        """`(côté "gauche"/"droite", abscisse en m, distance à la ligne centrale)`."""
+        d, abscisse, croisement = _projeter(x, y, self.aretes)
+        return ("gauche" if croisement >= 0 else "droite"), abscisse, d
+
+
 class DecouverteGeometrique:
     def __init__(
         self, wegenregister: WegenregisterService, cadastre: CadastreService, rayon_m: float = RAYON_RIVERAIN_M,
@@ -164,28 +198,40 @@ class DecouverteGeometrique:
         # le bbox doit couvrir rayon + PAS/2 pour ne rater aucune parcelle.
         self._marge_bbox_m = rayon_m + _PAS_ECHANTILLON_M / 2
 
-    def parcelles_le_long(self, gemeentenaam: str, straatnaam: str) -> List[ParcelleLeLong]:
-        """Parcelles bordant `straatnaam`, ordonnées (côté gauche puis droit,
-        abscisse croissante). Liste vide si la rue est introuvable dans le
+    def tracer(self, gemeentenaam: str, straatnaam: str) -> Optional[Trace]:
+        """Tracé chaîné de la rue, ou `None` si la rue est introuvable dans le
         registre ou n'a aucun segment. Les erreurs réseau remontent."""
         id_rue = self._weg.trouver_id_rue(gemeentenaam, straatnaam)
         if id_rue is None:
             _logger.warning("Découverte géométrique : rue '%s' (%s) introuvable dans le registre.", straatnaam, gemeentenaam)
-            return []
+            return None
         segments = self._weg.segments(id_rue)
         if not segments:
             _logger.warning("Découverte géométrique : aucun segment de route pour '%s' (id %s).", straatnaam, id_rue)
-            return []
+            return None
         chemin = _chainer(segments)
-
-        # Arêtes de la ligne centrale avec abscisse cumulée (sens du parcours)
         aretes: List[Tuple[float, float, float, float, float]] = []
         cumul = 0.0
         for pts in chemin:
             for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                 aretes.append((ax, ay, bx, by, cumul))
                 cumul += math.hypot(bx - ax, by - ay)
-        longueur_totale = cumul
+        return Trace(id_rue=id_rue, chemin=chemin, aretes=aretes, longueur=cumul, n_segments=len(segments))
+
+    def parcelles_le_long(
+        self, gemeentenaam: str, straatnaam: str, trace: Optional[Trace] = None,
+    ) -> List[ParcelleLeLong]:
+        """Parcelles bordant `straatnaam` (jusqu'à `rayon_m`), ordonnées (côté
+        gauche puis droit, abscisse croissante). Liste vide si la rue est
+        introuvable. `trace` : tracé déjà calculé par `tracer` (évite de le
+        refaire). Les erreurs réseau remontent."""
+        if trace is None:
+            trace = self.tracer(gemeentenaam, straatnaam)
+        if trace is None:
+            return []
+        id_rue, chemin, aretes = trace.id_rue, trace.chemin, trace.aretes
+        longueur_totale = trace.longueur
+        segments = range(trace.n_segments)
 
         # Parcelles candidates : bbox autour de points échantillonnés
         candidates: Dict[str, Parcelle] = {}
@@ -221,13 +267,9 @@ class DecouverteGeometrique:
             for anneau in _anneaux_exterieurs(g):
                 pts_anneau = [(c[0], c[1]) for c in anneau]
                 for pt in _echantillonner(pts_anneau, _PAS_DENSIFICATION_M):
-                    for (ax, ay, bx, by, off) in aretes:
-                        dx, dy = bx - ax, by - ay
-                        l2 = dx * dx + dy * dy
-                        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((pt[0] - ax) * dx + (pt[1] - ay) * dy) / l2))
-                        d = math.hypot(pt[0] - (ax + t * dx), pt[1] - (ay + t * dy))
-                        if meilleur is None or d < meilleur[0]:
-                            meilleur = (d, off + t * math.sqrt(l2), dx * (pt[1] - ay) - dy * (pt[0] - ax))
+                    proj = _projeter(pt[0], pt[1], aretes)
+                    if meilleur is None or proj[0] < meilleur[0]:
+                        meilleur = proj
             if meilleur is None or meilleur[0] > self._rayon_m:
                 continue
             if aretes_autres:

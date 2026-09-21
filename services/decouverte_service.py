@@ -40,7 +40,7 @@ from models.adresse import AdresseBE
 from models.parcelle import Parcelle
 from services.adressen_service import AdressenService
 from services.cadastre_service import CadastreService, lambert72_vers_4258, vers_lambert72
-from services.decouverte_geometrique_service import DecouverteGeometrique
+from services.decouverte_geometrique_service import DecouverteGeometrique, Trace
 from utils.geometrie import point_interieur
 from utils.logger import get_logger
 
@@ -62,13 +62,15 @@ def decouvrir_parcelles(
     gemeentenaam: str, straatnaam: str, adressen: AdressenService, cadastre: CadastreService,
     geometrique: Optional[DecouverteGeometrique] = None,
 ) -> List[ParcelleTrouvee]:
-    """Découvre et ordonne les parcelles de `straatnaam` (`gemeentenaam`) :
-    un côté d'abord (numéros impairs par convention, voir plus bas), puis
-    l'autre, chacun trié par numéro croissant, chaque parcelle adressée
-    immédiatement suivie de ses éventuelles sœurs sans adresse propre --
-    voir le docstring du module. Si `geometrique` est fourni, les parcelles
-    qui bordent la rue SANS aucune adresse (champs, digues) sont ajoutées à
-    la fin, côté gauche puis droit -- voir `decouverte_geometrique_service`."""
+    """Découvre et ordonne les parcelles de `straatnaam` (`gemeentenaam`).
+    Sans `geometrique` : un côté d'abord (numéros impairs), puis l'autre,
+    chacun par numéro croissant, chaque parcelle adressée suivie de ses sœurs
+    sans adresse propre. Avec `geometrique` : les parcelles qui bordent la
+    rue SANS aucune adresse (champs, digues) sont ajoutées, et TOUTES les
+    parcelles (avec ou sans numéro) sont ordonnées le long de la rue, un côté
+    d'abord puis l'autre, dans l'ordre d'apparition (`_ordonner_le_long`,
+    demande du 2026-09-21) ; repli sur l'ordre pair/impair si le tracé de la
+    rue est indisponible."""
     adresses = adressen.lister_adresses(gemeentenaam, straatnaam)
     if not adresses:
         _logger.warning("Aucune adresse trouvée pour '%s' (%s).", straatnaam, gemeentenaam)
@@ -142,42 +144,112 @@ def decouvrir_parcelles(
                 ParcelleTrouvee(parcelle=voisine, adresses=[adresse_synth], cote="sans_adresse"),
             )
 
-    # Un côté d'abord (impair, convention standard belge/européenne —
-    # numéros impairs généralement d'un côté, pairs de l'autre), puis
-    # l'autre, chacun par numéro croissant. Les sœurs sans adresse n'ont
-    # pas leur place dans ce tri (pas de vrai numéro) -- aplaties juste
-    # après leur ancrage ensuite, jamais mélangées au tri lui-même.
+    # -- Tracé de la rue + parcelles SANS adresse le long de la route -------
+    trace: Optional[Trace] = None
+    le_long: list = []
+    if geometrique is not None:
+        try:
+            trace = geometrique.tracer(gemeentenaam, straatnaam)
+        except Exception as exc:  # noqa: BLE001 -- jamais perdre les parcelles déjà trouvées par adresse
+            _logger.warning(
+                "Tracé de '%s' (%s) indisponible (%s: %s) -- ordre par numéros pair/impair, sans parcelles "
+                "géométriques pour ce run ; relance plus tard pour retenter.",
+                straatnaam, gemeentenaam, type(exc).__name__, exc,
+            )
+        if trace is not None:
+            try:
+                le_long = geometrique.parcelles_le_long(gemeentenaam, straatnaam, trace)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "Découverte géométrique de '%s' (%s) a échoué (%s: %s) -- seules les parcelles liées à une "
+                    "adresse sont retournées pour ce run ; relance plus tard pour retenter.",
+                    straatnaam, gemeentenaam, type(exc).__name__, exc,
+                )
+                le_long = []
+
+    entrees_geo: List[Tuple[ParcelleTrouvee, str, float]] = []
+    for pl in le_long:
+        ref = pl.parcelle.reference
+        if ref in references_adressees or ref in references_emises:
+            continue  # déjà trouvée par adresse (ou comme sœur) -- jamais dupliquée
+        references_emises.add(ref)
+        adresse_synth = AdresseBE(
+            object_id="", huisnummer="/", straatnaam=straatnaam, gemeentenaam=gemeentenaam,
+            x=pl.x, y=pl.y, capakeys=[ref],
+        )
+        entrees_geo.append((ParcelleTrouvee(parcelle=pl.parcelle, adresses=[adresse_synth], cote="geometrie"), pl.cote, pl.abscisse))
+    if geometrique is not None:
+        _logger.info("'%s' : %d parcelle(s) supplémentaire(s) trouvée(s) par la géométrie de la rue.", straatnaam, len(entrees_geo))
+
+    if trace is not None:
+        return _ordonner_le_long(trouvees, entrees_geo, trace, straatnaam)
+
+    # Repli SANS tracé : un côté d'abord (impair, convention standard belge/
+    # européenne -- numéros impairs généralement d'un côté, pairs de l'autre),
+    # puis l'autre, chacun par numéro croissant. Les sœurs sans adresse sont
+    # aplaties juste après leur ancrage.
     ordre_cote = {"impair": 0, "pair": 1}
     trouvees.sort(key=lambda pt: (ordre_cote.get(pt.cote, 2), pt.adresses[0].numero))
-
     resultat: List[ParcelleTrouvee] = []
     for entree in trouvees:
         resultat.append(entree)
         resultat.extend(entree.voisines_sans_adresse)
+    return resultat
 
-    if geometrique is not None:
-        try:
-            le_long = geometrique.parcelles_le_long(gemeentenaam, straatnaam)
-        except Exception as exc:  # noqa: BLE001 -- ne fait jamais perdre les parcelles déjà trouvées par adresse
-            _logger.warning(
-                "Découverte géométrique de '%s' (%s) a échoué (%s: %s) -- seules les parcelles liées à une "
-                "adresse sont retournées pour ce run ; relance plus tard pour retenter.",
-                straatnaam, gemeentenaam, type(exc).__name__, exc,
-            )
-            le_long = []
-        n_geo = 0
-        for pl in le_long:
-            ref = pl.parcelle.reference
-            if ref in references_adressees or ref in references_emises:
-                continue  # déjà trouvée par adresse (ou comme sœur) -- jamais dupliquée
-            references_emises.add(ref)
-            adresse_synth = AdresseBE(
-                object_id="", huisnummer="/", straatnaam=straatnaam, gemeentenaam=gemeentenaam,
-                x=pl.x, y=pl.y, capakeys=[ref],
-            )
-            resultat.append(ParcelleTrouvee(parcelle=pl.parcelle, adresses=[adresse_synth], cote="geometrie"))
-            n_geo += 1
-        _logger.info("'%s' : %d parcelle(s) supplémentaire(s) trouvée(s) par la géométrie de la rue.", straatnaam, n_geo)
+
+def _ordonner_le_long(
+    trouvees: List[ParcelleTrouvee], entrees_geo: List[Tuple[ParcelleTrouvee, str, float]],
+    trace: Trace, straatnaam: str,
+) -> List[ParcelleTrouvee]:
+    """Ordre "un côté d'abord, puis l'autre, dans l'ordre d'apparition" pour
+    TOUTES les parcelles, avec ou sans numéro de maison (demande du
+    2026-09-21 : "toujours dans l'ordre, même si le numéro n'est ni pair ni
+    impair"). Chaque parcelle -- adressée (position de son adresse) ou non
+    (point intérieur de la parcelle) -- reçoit un côté et une abscisse le long
+    de la ligne centrale de la rue ; les sœurs sans adresse suivent leur
+    ancrage. Deux choix pour rester cohérent avec l'ancienne convention :
+    - SENS : le tracé est retourné si les numéros de maison DÉCROISSENT le
+      long du tracé (corrélation numéro/abscisse négative), pour que l'ordre
+      aille dans le sens des numéros croissants ;
+    - PREMIER CÔTÉ : celui qui porte la majorité des numéros impairs (comme
+      avant) ; sans adresse du tout (Rode Moerdijk), le côté "gauche" du
+      tracé, arbitraire mais déterministe."""
+    items: List[list] = []  # [entrée, côté, abscisse]
+    for e in trouvees:
+        a = e.adresses[0]
+        cote, abscisse, _ = trace.position(a.x, a.y)
+        items.append([e, cote, abscisse])
+    n_adressees = len(items)
+    for e, cote, abscisse in entrees_geo:
+        items.append([e, cote, abscisse])
+
+    numeros = [(it[0].adresses[0].numero, it[2]) for it in items[:n_adressees] if it[0].adresses[0].numero > 0]
+    retourne = False
+    if len(numeros) >= 2:
+        m_n = sum(n for n, _ in numeros) / len(numeros)
+        m_a = sum(a for _, a in numeros) / len(numeros)
+        retourne = sum((n - m_n) * (a - m_a) for n, a in numeros) < 0
+    if retourne:
+        for it in items:
+            it[2] = trace.longueur - it[2]
+            it[1] = "droite" if it[1] == "gauche" else "gauche"
+
+    impairs = {"gauche": 0, "droite": 0}
+    for it in items[:n_adressees]:
+        a = it[0].adresses[0]
+        if a.numero > 0 and a.parite == "impair":
+            impairs[it[1]] += 1
+    premier = "droite" if impairs["droite"] > impairs["gauche"] else "gauche"
+    _logger.info(
+        "'%s' : ordre le long de la rue (%.0f m) -- sens %s, premier côté '%s' (impairs : %d à gauche, %d à droite).",
+        straatnaam, trace.longueur, "inversé" if retourne else "du tracé", premier, impairs["gauche"], impairs["droite"],
+    )
+
+    items.sort(key=lambda it: (0 if it[1] == premier else 1, it[2]))
+    resultat: List[ParcelleTrouvee] = []
+    for entree, _cote, _abscisse in items:
+        resultat.append(entree)
+        resultat.extend(entree.voisines_sans_adresse)
     return resultat
 
 
