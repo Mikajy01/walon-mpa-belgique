@@ -13,7 +13,13 @@ Le filtre se fait sur `linkerstraatnaamObjectId`/`rechterstraatnaamObjectId`
 (PAS sur le nom) : le même nom de rue existe dans plusieurs communes, l'id de
 `/v2/straatnamen?gemeentenaam=...` lève l'ambiguïté (vérifié : ce filtre par
 id fonctionne, contrairement au paramètre `straatnaamId` de `/v2/adressen`
-qui est ignoré silencieusement par l'API)."""
+qui est ignoré silencieusement par l'API).
+
+`segments_autour` renvoie TOUS les segments d'une emprise (toutes rues + les
+segments sans nom de rue, ex. chemins agricoles) : sert à ne pas attribuer à
+la rue traitée une parcelle qui donne en réalité sur une rue voisine (vérifié
+autour de Rode Moerstraat : Klingedijkstraat, Cappaertstraat, Veldstraat...
+dans un rayon de 100 m)."""
 
 from __future__ import annotations
 
@@ -30,6 +36,7 @@ from utils.text_normalize import normaliser
 _logger = get_logger("services.wegenregister_service")
 
 _WFS_BASE = "https://geo.api.vlaanderen.be/Wegenregister/wfs"
+_PLAFOND = 1000
 
 _RE_POSLIST = re.compile(r"<gml:posList[^>]*>([^<]*)</gml:posList>")
 
@@ -40,6 +47,14 @@ class Segment:
     begin: str  # id du noeud de départ (pour chaîner les segments dans l'ordre)
     eind: str
     points: List[Tuple[float, float]]  # Lambert 72 (x, y)
+    # ids de rue des côtés gauche/droit ; vide = segment SANS nom de rue
+    # (chemin agricole...). Sert à savoir à quelle rue appartient un segment.
+    straat_ids: Tuple[str, ...] = ()
+
+
+def _champ(bloc: str, nom: str) -> Optional[str]:
+    m = re.search(rf"<Wegenregister:{nom}>([^<]*)</Wegenregister:{nom}>", bloc)
+    return m.group(1) if m else None
 
 
 class WegenregisterService:
@@ -78,18 +93,44 @@ class WegenregisterService:
             "typeNames": "Wegenregister:Wegsegment", "filter": filtre, "count": 500,
         }
         xml = self._http.get_text(_WFS_BASE, params, service_key="wegenregister_be")
+        return self._parser(xml)
+
+    def segments_autour(self, xmin: float, ymin: float, xmax: float, ymax: float) -> List[Segment]:
+        """TOUS les segments (toutes rues + sans nom) de l'emprise Lambert 72.
+        Plafonné à `_PLAFOND` : au-delà, un avertissement signale une
+        troncature possible (jamais silencieuse)."""
+        params = {
+            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+            "typeNames": "Wegenregister:Wegsegment", "count": _PLAFOND,
+            "bbox": f"{xmin},{ymin},{xmax},{ymax},urn:ogc:def:crs:EPSG::31370",
+        }
+        xml = self._http.get_text(_WFS_BASE, params, service_key="wegenregister_be")
+        segments = self._parser(xml)
+        if len(segments) >= _PLAFOND:
+            _logger.warning(
+                "Wegenregister : %d segments dans l'emprise (plafond) -- des rues voisines ont pu être TRONQUÉES.",
+                len(segments),
+            )
+        return segments
+
+    @staticmethod
+    def _parser(xml: str) -> List[Segment]:
         segments: List[Segment] = []
         for bloc in xml.split("<wfs:member>")[1:]:
-            m_id = re.search(r"<Wegenregister:objectId>([^<]*)</Wegenregister:objectId>", bloc)
-            m_beg = re.search(r"<Wegenregister:beginknoopObjectId>([^<]*)</Wegenregister:beginknoopObjectId>", bloc)
-            m_end = re.search(r"<Wegenregister:eindknoopObjectId>([^<]*)</Wegenregister:eindknoopObjectId>", bloc)
+            id_ = _champ(bloc, "objectId")
+            beg = _champ(bloc, "beginknoopObjectId")
+            end = _champ(bloc, "eindknoopObjectId")
             m_pos = _RE_POSLIST.search(bloc)
-            if not (m_id and m_beg and m_end and m_pos):
+            if not (id_ and beg and end and m_pos):
                 _logger.warning("Segment de route inexploitable ignoré (champ manquant).")
                 continue
             valeurs = [float(v) for v in m_pos.group(1).split()]
             points = list(zip(valeurs[0::2], valeurs[1::2]))
             if len(points) < 2:
                 continue
-            segments.append(Segment(m_id.group(1), m_beg.group(1), m_end.group(1), points))
+            # "-9" (et autres valeurs négatives) = placeholder "pas de nom de rue" (vérifié en direct :
+            # segments sans nom autour de Rode Moerstraat) -- jamais un vrai id de rue.
+            bruts = (_champ(bloc, "linkerstraatnaamObjectId"), _champ(bloc, "rechterstraatnaamObjectId"))
+            ids = tuple(i for i in bruts if i and i.isdigit() and int(i) > 0)
+            segments.append(Segment(id_, beg, end, points, ids))
         return segments

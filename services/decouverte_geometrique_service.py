@@ -25,6 +25,16 @@ Choix documentés :
   par run (demande du 2026-09-21 : "pas seulement ce qui borde, jusqu'à 50 m"
   pour Rode Moerdijk/Rode Moerstraat, rues rurales dont les champs ne touchent
   pas tous la route) -- le bbox de recherche s'élargit en conséquence.
+- **Attribution à la rue la plus proche** (demande du 2026-09-21 : "ne pas prendre
+  les parcelles des autres rues") : avec un rayon large, on capterait les
+  parcelles qui donnent sur une rue voisine (vérifié autour de Rode Moerstraat :
+  Klingedijkstraat, Cappaertstraat, Veldstraat... à moins de 100 m). Chaque
+  parcelle candidate est comparée aux segments des AUTRES rues NOMMÉES du
+  Wegenregister : si elle est plus proche (de plus de `_TOLERANCE_ATTRIBUTION_M`)
+  d'une autre rue que de celle traitée, elle est écartée. Les segments SANS nom
+  (chemins agricoles) ne comptent pas comme "autre rue". Un parcelle d'angle
+  (à égale distance de deux rues) reste attribuée aux deux : le premier run
+  qui l'écrit la garde (dédoublonnage par numéro cadastral dans le fichier).
 - Une parcelle que la ligne centrale TRAVERSE (route bâtie sur une parcelle
   cadastrale, chemin agricole privé) n'est pas exclue automatiquement : voir
   le champ `traverse`, l'appelant décide.
@@ -51,6 +61,7 @@ RAYON_RIVERAIN_M = 10.0
 _PAS_ECHANTILLON_M = 50.0
 _PAS_DENSIFICATION_M = 5.0
 _PLAFOND_CADASTRE = 200
+_TOLERANCE_ATTRIBUTION_M = 1.0
 
 
 @dataclass
@@ -125,6 +136,23 @@ def _anneaux_exterieurs(geom_l72: Dict) -> List[List[List[float]]]:
     return [poly[0] for poly in geom_l72["coordinates"]]
 
 
+def _distance_min_aux_aretes(geom_l72: Dict, aretes: List[Tuple[float, float, float, float]]) -> float:
+    """Distance minimale (m) entre la LIMITE d'une parcelle (Lambert 72) et un
+    ensemble d'arêtes de routes -- même mesure que pour la rue traitée, pour que
+    la comparaison "quelle rue est la plus proche" soit cohérente."""
+    meilleur = math.inf
+    for anneau in _anneaux_exterieurs(geom_l72):
+        for px, py in _echantillonner([(c[0], c[1]) for c in anneau], _PAS_DENSIFICATION_M):
+            for ax, ay, bx, by in aretes:
+                dx, dy = bx - ax, by - ay
+                l2 = dx * dx + dy * dy
+                t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+                d = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+                if d < meilleur:
+                    meilleur = d
+    return meilleur
+
+
 class DecouverteGeometrique:
     def __init__(
         self, wegenregister: WegenregisterService, cadastre: CadastreService, rayon_m: float = RAYON_RIVERAIN_M,
@@ -180,6 +208,9 @@ class DecouverteGeometrique:
             straatnaam, len(segments), longueur_totale, n_requetes, len(candidates),
         )
 
+        aretes_autres = self._aretes_autres_rues(id_rue, chemin)
+        n_autres_rues = 0
+
         centre = [pt for pts in chemin for pt in _echantillonner(pts, _PAS_DENSIFICATION_M)]
         resultats: List[ParcelleLeLong] = []
         for p in candidates.values():
@@ -199,11 +230,39 @@ class DecouverteGeometrique:
                             meilleur = (d, off + t * math.sqrt(l2), dx * (pt[1] - ay) - dy * (pt[0] - ax))
             if meilleur is None or meilleur[0] > self._rayon_m:
                 continue
+            if aretes_autres:
+                d_autre = _distance_min_aux_aretes(g, aretes_autres)
+                if d_autre + _TOLERANCE_ATTRIBUTION_M < meilleur[0]:
+                    n_autres_rues += 1
+                    continue  # plus proche d'une AUTRE rue nommée : appartient à celle-ci
             traverse = any(point_dans_geometrie(cx, cy, g) for cx, cy in centre)
             x, y = point_interieur(g)
             resultats.append(ParcelleLeLong(
                 parcelle=p, cote="gauche" if meilleur[2] >= 0 else "droite",
                 abscisse=meilleur[1], distance=meilleur[0], traverse=traverse, x=x, y=y,
             ))
+        if n_autres_rues:
+            _logger.info(
+                "Découverte géométrique '%s' : %d parcelle(s) écartée(s) car plus proches d'une AUTRE rue.",
+                straatnaam, n_autres_rues,
+            )
         resultats.sort(key=lambda r: (0 if r.cote == "gauche" else 1, r.abscisse))
         return resultats
+
+    def _aretes_autres_rues(
+        self, id_rue: str, chemin: List[List[Tuple[float, float]]],
+    ) -> List[Tuple[float, float, float, float]]:
+        """Arêtes (Lambert 72) des segments des AUTRES rues NOMMÉES autour de la rue
+        traitée (emprise du tracé + rayon + marge). Un segment dont l'un des côtés est
+        la rue traitée lui appartient ; un segment SANS nom de rue est ignoré."""
+        xs = [x for pts in chemin for x, _ in pts]
+        ys = [y for pts in chemin for _, y in pts]
+        marge = self._rayon_m + _PAS_ECHANTILLON_M
+        voisins = self._weg.segments_autour(min(xs) - marge, min(ys) - marge, max(xs) + marge, max(ys) + marge)
+        aretes: List[Tuple[float, float, float, float]] = []
+        for seg in voisins:
+            if not seg.straat_ids or id_rue in seg.straat_ids:
+                continue
+            for (ax, ay), (bx, by) in zip(seg.points, seg.points[1:]):
+                aretes.append((ax, ay, bx, by))
+        return aretes
