@@ -18,7 +18,17 @@ class AdresseBE:
 
     `x`/`y` sont en Lambert 72 (EPSG:31370, confirmé en direct sur
     `adresPositie.geometrie.gml`), PAS lat/lon — contrairement aux
-    adresses BAN françaises."""
+    adresses BAN françaises.
+
+    `postcode` : le VRAI code postal officiel de CETTE adresse précise
+    (`postinfo.objectId` de la réponse détail), PAS le code postal donné
+    en paramètre du run -- écart réel confirmé le 2026-09-23 (Sint-Truiden) :
+    un même lot de rues à traiter peut mélanger plusieurs codes postaux
+    réels (3800/3803/3806 selon la rue, communes fusionnées/déelgemeenten),
+    jamais un seul code valable pour toute la commune. Vide ("") pour une
+    adresse SYNTHÉTIQUE (parcelle sans adresse propre, voir
+    `decouverte_service.py`) dont le code n'a pas pu être déterminé --
+    l'appelant (main.py) retombe alors sur le code postal du run."""
 
     object_id: str
     huisnummer: str
@@ -27,6 +37,7 @@ class AdresseBE:
     x: float
     y: float
     capakeys: List[str] = field(default_factory=list)
+    postcode: str = ""
 
     @property
     def parite(self) -> str:

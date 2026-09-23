@@ -128,7 +128,7 @@ def decouvrir_parcelles(
                 continue  # a sa PROPRE adresse ailleurs -- jamais dupliquée en "sans adresse"
             if voisine.reference in references_emises:
                 continue  # déjà ajoutée comme sœur d'un autre ancrage
-            adresse_synth = _adresse_synthetique_sans_adresse(gemeentenaam, straatnaam, voisine)
+            adresse_synth = _adresse_synthetique_sans_adresse(gemeentenaam, straatnaam, voisine, premiere.postcode)
             if adresse_synth is None:
                 # Géométrie de la sœur elle-même inexploitable (jamais vu en
                 # pratique -- le bbox qui l'a rapportée avait forcément une
@@ -172,6 +172,12 @@ def decouvrir_parcelles(
                 )
                 le_long = []
 
+    # Code postal de reference pour les parcelles trouvees par geometrie (aucune
+    # adresse propre a leur emprunter, voir AdresseBE.postcode) -- premiere valeur
+    # REELLE trouvee parmi les adresses de CETTE rue (jamais celui d'une autre rue
+    # du meme run) ; vide si la rue n'a vraiment aucune adresse (ex. Rode Moerdijk),
+    # l'appelant (main.py) retombe alors sur le code postal du run.
+    postcode_rue = next((a.postcode for a in adresses if a.postcode), "")
     entrees_geo: List[Tuple[ParcelleTrouvee, str, float]] = []
     for pl in le_long:
         ref = pl.parcelle.reference
@@ -180,7 +186,7 @@ def decouvrir_parcelles(
         references_emises.add(ref)
         adresse_synth = AdresseBE(
             object_id="", huisnummer="/", straatnaam=straatnaam, gemeentenaam=gemeentenaam,
-            x=pl.x, y=pl.y, capakeys=[ref],
+            x=pl.x, y=pl.y, capakeys=[ref], postcode=postcode_rue,
         )
         entrees_geo.append((ParcelleTrouvee(parcelle=pl.parcelle, adresses=[adresse_synth], cote="geometrie"), pl.cote, pl.abscisse))
     if geometrique is not None:
@@ -266,7 +272,7 @@ def _resoudre_geometrie_et_voisines(
 
 
 def _adresse_synthetique_sans_adresse(
-    gemeentenaam: str, straatnaam: str, voisine: Parcelle,
+    gemeentenaam: str, straatnaam: str, voisine: Parcelle, postcode: str = "",
 ) -> Optional[AdresseBE]:
     """Construit une "adresse" SYNTHÉTIQUE (`huisnummer="/"`, même
     convention "non applicable" que le reste du projet -- RUP, DE/DV/EB,
@@ -280,12 +286,18 @@ def _adresse_synthetique_sans_adresse(
     72 (`vers_lambert72`, l'inverse de `lambert72_vers_4258`) puisque
     TOUT le reste du pipeline (résolveur WFS, `AdresseBE.x/y`) travaille
     dans ce système, alors que la géométrie cadastrale est en EPSG:4258
-    (voir `cadastre_service.py::_parser_geometrie`)."""
+    (voir `cadastre_service.py::_parser_geometrie`).
+
+    `postcode` : le code postal RÉEL de l'adresse d'ancrage (voir
+    `AdresseBE.postcode`) -- une parcelle sœur est géographiquement
+    minuscule par rapport à son ancrage (subdivision du même terrain,
+    voir le docstring du module), donc son code postal réel est
+    forcément le même, jamais besoin de le rechercher séparément."""
     if voisine.geometry is None:
         return None
     lon, lat = point_interieur(voisine.geometry)
     x, y = vers_lambert72(lon, lat)
     return AdresseBE(
         object_id="", huisnummer="/", straatnaam=straatnaam, gemeentenaam=gemeentenaam,
-        x=x, y=y, capakeys=[voisine.reference],
+        x=x, y=y, capakeys=[voisine.reference], postcode=postcode,
     )

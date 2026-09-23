@@ -91,9 +91,17 @@ class AdressenService:
         if not capakeys:
             _logger.warning("Adresse %s (%s) : aucune parcelle liée dans le registre.", object_id, huisnummer)
 
+        # Code postal RÉEL de cette adresse précise -- jamais celui donné en
+        # paramètre du run (voir AdresseBE.postcode) : un lot de rues d'une
+        # même "commune" (au sens administratif large) peut mélanger
+        # plusieurs codes postaux réels (déelgemeenten/communes fusionnées).
+        postcode = data.get("postinfo", {}).get("objectId", "")
+        if not postcode:
+            _logger.warning("Adresse %s (%s) : pas de code postal exploitable dans le registre.", object_id, huisnummer)
+
         return AdresseBE(
             object_id=object_id, huisnummer=huisnummer, straatnaam=straatnaam,
-            gemeentenaam=gemeentenaam, x=x, y=y, capakeys=capakeys,
+            gemeentenaam=gemeentenaam, x=x, y=y, capakeys=capakeys, postcode=postcode,
         )
 
     def _capakeys_pour_adresse(self, object_id: str) -> List[str]:
