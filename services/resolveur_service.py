@@ -272,10 +272,18 @@ class ResolveurBE:
         dx = _get(erreurs, ("DX",), "watertoets risicozone", lambda: self._watertoets.risicozone(x, y))
         valeurs["DX"] = "ERREUR" if dx is _ERREUR else ("O" if dx else "N")
 
+        # Même défaut de structure qu'EN, corrigé au même moment (2026-09-24) : `elif
+        # lbl:` (vérité) laissait la cellule VIDE quand `lbl` est `None` (aucun polygone
+        # NOG:Nog à ce point -- le cas normal hors zone naturellement inondable), pas
+        # seulement sur une chaîne vide. Pas encore observé en pratique (cette rue de
+        # Sint-Truiden tombait toujours dans une zone classée), mais même risque
+        # structurel qu'EN -- corrigé par prudence avant qu'il ne se manifeste ailleurs.
         lbl = _get(erreurs, ("DW",), "watertoets van_nature_overstroombaar", lambda: self._watertoets.van_nature_overstroombaar(x, y))
         if lbl is _ERREUR:
             valeurs["DW"] = "ERREUR"
-        elif lbl:
+        elif lbl is None:
+            valeurs["DW"] = "N"
+        else:
             valeurs["DW"] = "O" if "niet" not in lbl.lower() else "N"
 
         # DZ : `overstromingsgebied_oeverzone_iwb` renvoie déjà "O"/"N"
@@ -290,10 +298,20 @@ class ResolveurBE:
         _colonne_resiliente(valeurs, erreurs, "DY", "watertoets recent_overstroomd", lambda: self._watertoets.recent_overstroomd(x, y))
 
         # -- Économie (EN valeur brute + EO->ER existence) ---------------
+        # Bug réel corrigé le 2026-09-24 (1060/1385 lignes vides sur un run
+        # Sint-Truiden) : `aangeboden_perceel` renvoie `None` -- une réponse
+        # LÉGITIME, pas une erreur -- pour l'immense majorité des parcelles
+        # (aucune parcelle "Bedrperc" à ce point, donc pas dans une zone
+        # d'entreprise du tout). L'ancien code ne posait "O"/"N" QUE si une
+        # parcelle Bedrperc existait, laissant la cellule VIDE partout
+        # ailleurs -- jamais voulu (même règle que ~100 autres colonnes de ce
+        # pipeline : "N" par défaut, jamais deviné mais jamais vide non plus).
         aangeboden = _get(erreurs, ("EN",), "economie aangeboden_perceel", lambda: self._economie.aangeboden_perceel(x, y))
         if aangeboden is _ERREUR:
             valeurs["EN"] = "ERREUR"
-        elif aangeboden is not None:
+        elif aangeboden is None:
+            valeurs["EN"] = "N"
+        else:
             valeurs["EN"] = "O" if aangeboden == "aangeboden" else "N"
         for lettre, methode in (
             ("EO", self._economie.bedrijventerrein), ("EP", self._economie.beheerde_bedrijvenzone),
@@ -314,10 +332,18 @@ class ResolveurBE:
             _colonne_resiliente(valeurs, erreurs, lettre, f"landinrichting {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Landschap ------------------------------------------------
+        # Même défaut de structure qu'EN/DW (corrigés le 2026-09-24) : `elif fb is not
+        # None:` laissait la cellule VIDE quand `fb is None` (aucun polygone à ce point)
+        # -- pas encore observé en pratique sur ce jeu de rues (couverture complète),
+        # mais même risque structurel, corrigé par prudence. Aucun polygone ici est
+        # conceptuellement proche de "Onbepaald" (déjà mappé sur N), pas une vraie
+        # correspondance -- même repli "N".
         fb = _get(erreurs, ("FB",), "landschap fysische_systeemeenheid", lambda: self._landschap.fysische_systeemeenheid(x, y))
         if fb is _ERREUR:
             valeurs["FB"] = "ERREUR"
-        elif fb is not None:
+        elif fb is None:
+            valeurs["FB"] = "N"
+        else:
             valeurs["FB"] = "N" if fb == "Onbepaald" else "O"
         _colonne_resiliente(valeurs, erreurs, "FC", "landschap traditioneel_landschap", lambda: self._landschap.traditioneel_landschap(x, y))
 
