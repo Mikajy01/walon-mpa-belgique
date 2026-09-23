@@ -175,7 +175,7 @@ class Trace:
     abscisse le long de la rue -- base de l'ordre "un côté d'abord, puis
     l'autre, dans l'ordre d'apparition" pour TOUTES les parcelles, avec ou sans
     numéro de maison (demande du 2026-09-21)."""
-    id_rue: str
+    straatnaam: str
     chemin: List[List[Tuple[float, float]]]
     aretes: List[Tuple[float, float, float, float, float]]  # ax, ay, bx, by, abscisse de départ
     longueur: float
@@ -198,14 +198,16 @@ class DecouverteGeometrique:
         # le bbox doit couvrir rayon + PAS/2 pour ne rater aucune parcelle.
         self._marge_bbox_m = rayon_m + _PAS_ECHANTILLON_M / 2
 
-    def tracer(self, gemeentenaam: str, straatnaam: str) -> Optional[Trace]:
+    def tracer(
+        self, gemeentenaam: str, straatnaam: str, ref_xy: Optional[Tuple[float, float]] = None,
+    ) -> Optional[Trace]:
         """Tracé chaîné de la rue, ou `None` si la rue est introuvable dans le
         registre ou n'a aucun segment. Les erreurs réseau remontent."""
         id_rue = self._weg.trouver_id_rue(gemeentenaam, straatnaam)
         if id_rue is None:
             _logger.warning("Découverte géométrique : rue '%s' (%s) introuvable dans le registre.", straatnaam, gemeentenaam)
             return None
-        segments = self._weg.segments(id_rue)
+        segments = self._weg.segments(id_rue, straatnaam, ref_xy)
         if not segments:
             _logger.warning("Découverte géométrique : aucun segment de route pour '%s' (id %s).", straatnaam, id_rue)
             return None
@@ -216,7 +218,7 @@ class DecouverteGeometrique:
             for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                 aretes.append((ax, ay, bx, by, cumul))
                 cumul += math.hypot(bx - ax, by - ay)
-        return Trace(id_rue=id_rue, chemin=chemin, aretes=aretes, longueur=cumul, n_segments=len(segments))
+        return Trace(straatnaam=straatnaam, chemin=chemin, aretes=aretes, longueur=cumul, n_segments=len(segments))
 
     def parcelles_le_long(
         self, gemeentenaam: str, straatnaam: str, trace: Optional[Trace] = None,
@@ -229,7 +231,7 @@ class DecouverteGeometrique:
             trace = self.tracer(gemeentenaam, straatnaam)
         if trace is None:
             return []
-        id_rue, chemin, aretes = trace.id_rue, trace.chemin, trace.aretes
+        straatnaam, chemin, aretes = trace.straatnaam, trace.chemin, trace.aretes
         longueur_totale = trace.longueur
         segments = range(trace.n_segments)
 
@@ -254,7 +256,7 @@ class DecouverteGeometrique:
             straatnaam, len(segments), longueur_totale, n_requetes, len(candidates),
         )
 
-        aretes_autres = self._aretes_autres_rues(id_rue, chemin)
+        aretes_autres = self._aretes_autres_rues(straatnaam, chemin)
         n_autres_rues = 0
 
         centre = [pt for pts in chemin for pt in _echantillonner(pts, _PAS_DENSIFICATION_M)]
@@ -292,18 +294,21 @@ class DecouverteGeometrique:
         return resultats
 
     def _aretes_autres_rues(
-        self, id_rue: str, chemin: List[List[Tuple[float, float]]],
+        self, straatnaam: str, chemin: List[List[Tuple[float, float]]],
     ) -> List[Tuple[float, float, float, float]]:
         """Arêtes (Lambert 72) des segments des AUTRES rues NOMMÉES autour de la rue
-        traitée (emprise du tracé + rayon + marge). Un segment dont l'un des côtés est
-        la rue traitée lui appartient ; un segment SANS nom de rue est ignoré."""
+        traitée (emprise du tracé + rayon + marge). Un segment dont l'un des côtés PORTE
+        LE MÊME NOM que la rue traitée lui appartient (comparaison par NOM, pas par id --
+        écart réel confirmé le 2026-09-22, Knesselare : l'id du registre d'adresses ne
+        correspond pas toujours à celui du Wegenregister pour la même route, voir
+        wegenregister_service.py) ; un segment SANS nom de rue est ignoré."""
         xs = [x for pts in chemin for x, _ in pts]
         ys = [y for pts in chemin for _, y in pts]
         marge = self._rayon_m + _PAS_ECHANTILLON_M
         voisins = self._weg.segments_autour(min(xs) - marge, min(ys) - marge, max(xs) + marge, max(ys) + marge)
         aretes: List[Tuple[float, float, float, float]] = []
         for seg in voisins:
-            if not seg.straat_ids or id_rue in seg.straat_ids:
+            if not seg.straat_noms or straatnaam in seg.straat_noms:
                 continue
             for (ax, ay), (bx, by) in zip(seg.points, seg.points[1:]):
                 aretes.append((ax, ay, bx, by))

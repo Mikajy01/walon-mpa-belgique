@@ -148,8 +148,13 @@ def decouvrir_parcelles(
     trace: Optional[Trace] = None
     le_long: list = []
     if geometrique is not None:
+        # Position d'une adresse CONNUE de cette rue (même sans parcelle liée, voir
+        # AdresseBE plus haut) -- sert de point de référence au repli par nom du
+        # Wegenregister (écart réel Knesselare, voir wegenregister_service.py) : sans
+        # position de référence, ce repli ne peut pas écarter une rue homonyme ailleurs.
+        ref_xy = (adresses[0].x, adresses[0].y) if adresses else None
         try:
-            trace = geometrique.tracer(gemeentenaam, straatnaam)
+            trace = geometrique.tracer(gemeentenaam, straatnaam, ref_xy)
         except Exception as exc:  # noqa: BLE001 -- jamais perdre les parcelles déjà trouvées par adresse
             _logger.warning(
                 "Tracé de '%s' (%s) indisponible (%s: %s) -- ordre par numéros pair/impair, sans parcelles "
