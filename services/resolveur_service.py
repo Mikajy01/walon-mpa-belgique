@@ -249,28 +249,28 @@ class ResolveurBE:
         _un_parmi_resilient(valeurs, erreurs, geluid_spoorwegen, "bruit voies ferrées", lambda: self._bruit.colonne_bruit_voies_ferrees(x, y))
 
         # -- Watertoets ---------------------------------------------------
-        overstr = _get(erreurs, ("DC", "DD"), "watertoets overstromingsgevoelig", lambda: self._watertoets.overstromingsgevoelig(x, y))
+        overstr = _get(erreurs, ("DD", "DE"), "watertoets overstromingsgevoelig", lambda: self._watertoets.overstromingsgevoelig(x, y))
         if overstr is _ERREUR:
-            valeurs["DC"] = "ERREUR"
             valeurs["DD"] = "ERREUR"
+            valeurs["DE"] = "ERREUR"
         else:
-            gagnant_dcdd = "DC" if overstr == "mogelijk" else "DD" if overstr == "effectief" else None
-            _un_parmi(valeurs, ("DC", "DD"), {gagnant_dcdd} if gagnant_dcdd else None)
+            gagnant_dcdd = "DD" if overstr == "mogelijk" else "DE" if overstr == "effectief" else None
+            _un_parmi(valeurs, ("DD", "DE"), {gagnant_dcdd} if gagnant_dcdd else None)
 
-        signaal = _get(erreurs, ("DT", "DU"), "watertoets signaalgebied_categorie", lambda: self._watertoets.signaalgebied_categorie(x, y))
+        signaal = _get(erreurs, ("DU", "DV"), "watertoets signaalgebied_categorie", lambda: self._watertoets.signaalgebied_categorie(x, y))
         if signaal is _ERREUR:
-            valeurs["DT"] = "ERREUR"
             valeurs["DU"] = "ERREUR"
+            valeurs["DV"] = "ERREUR"
         else:
-            gagnant_dtdu = "DT" if signaal == "Bouwvrije opgave" else "DU" if signaal == "Verscherpte watertoets" else None
-            _un_parmi(valeurs, ("DT", "DU"), {gagnant_dtdu} if gagnant_dtdu else None)
+            gagnant_dtdu = "DU" if signaal == "Bouwvrije opgave" else "DV" if signaal == "Verscherpte watertoets" else None
+            _un_parmi(valeurs, ("DU", "DV"), {gagnant_dtdu} if gagnant_dtdu else None)
 
         # DX : colonne seule (pas de sœur) -- risicozone() renvoie le
         # texte du champ si une feature existe, sinon None (jamais
         # deviné entre "hors zone" et "pas de risque", même convention
         # que les ~100 autres colonnes existence-only du pipeline).
-        dx = _get(erreurs, ("DX",), "watertoets risicozone", lambda: self._watertoets.risicozone(x, y))
-        valeurs["DX"] = "ERREUR" if dx is _ERREUR else ("O" if dx else "N")
+        dx = _get(erreurs, ("DY",), "watertoets risicozone", lambda: self._watertoets.risicozone(x, y))
+        valeurs["DY"] = "ERREUR" if dx is _ERREUR else ("O" if dx else "N")
 
         # Même défaut de structure qu'EN, corrigé au même moment (2026-09-24) : `elif
         # lbl:` (vérité) laissait la cellule VIDE quand `lbl` est `None` (aucun polygone
@@ -278,24 +278,24 @@ class ResolveurBE:
         # seulement sur une chaîne vide. Pas encore observé en pratique (cette rue de
         # Sint-Truiden tombait toujours dans une zone classée), mais même risque
         # structurel qu'EN -- corrigé par prudence avant qu'il ne se manifeste ailleurs.
-        lbl = _get(erreurs, ("DW",), "watertoets van_nature_overstroombaar", lambda: self._watertoets.van_nature_overstroombaar(x, y))
+        lbl = _get(erreurs, ("DX",), "watertoets van_nature_overstroombaar", lambda: self._watertoets.van_nature_overstroombaar(x, y))
         if lbl is _ERREUR:
-            valeurs["DW"] = "ERREUR"
+            valeurs["DX"] = "ERREUR"
         elif lbl is None:
-            valeurs["DW"] = "N"
+            valeurs["DX"] = "N"
         else:
-            valeurs["DW"] = "O" if "niet" not in lbl.lower() else "N"
+            valeurs["DX"] = "O" if "niet" not in lbl.lower() else "N"
 
         # DZ : `overstromingsgebied_oeverzone_iwb` renvoie déjà "O"/"N"
         # (voir `_existe_wfs`) -- écrire directement la valeur.
-        _colonne_resiliente(valeurs, erreurs, "DZ", "watertoets overstromingsgebied_oeverzone_iwb", lambda: self._watertoets.overstromingsgebied_oeverzone_iwb(x, y))
+        _colonne_resiliente(valeurs, erreurs, "EA", "watertoets overstromingsgebied_oeverzone_iwb", lambda: self._watertoets.overstromingsgebied_oeverzone_iwb(x, y))
 
-        _un_parmi_resilient(valeurs, erreurs, ("DR", "DS"), "watertoets colonne_afgebakend_oeverzone_iwb", lambda: self._watertoets.colonne_afgebakend_oeverzone_iwb(x, y))
-        _un_parmi_resilient(valeurs, erreurs, ("DF", "DG", "DH", "DI"), "watertoets pluviaal", lambda: self._watertoets.colonne_overstromingsgevoelig_pluviaal(x, y))
-        _un_parmi_resilient(valeurs, erreurs, ("DJ", "DK", "DL", "DM"), "watertoets fluviaal", lambda: self._watertoets.colonne_overstromingsgevoelig_fluviaal(x, y))
-        _un_parmi_resilient(valeurs, erreurs, ("DN", "DO", "DP", "DQ"), "watertoets zee", lambda: self._watertoets.colonne_overstromingsgevoelig_zee(x, y))
+        _un_parmi_resilient(valeurs, erreurs, ("DS", "DT"), "watertoets colonne_afgebakend_oeverzone_iwb", lambda: self._watertoets.colonne_afgebakend_oeverzone_iwb(x, y))
+        _un_parmi_resilient(valeurs, erreurs, ("DG", "DH", "DI", "DJ"), "watertoets pluviaal", lambda: self._watertoets.colonne_overstromingsgevoelig_pluviaal(x, y))
+        _un_parmi_resilient(valeurs, erreurs, ("DK", "DL", "DM", "DN"), "watertoets fluviaal", lambda: self._watertoets.colonne_overstromingsgevoelig_fluviaal(x, y))
+        _un_parmi_resilient(valeurs, erreurs, ("DO", "DP", "DQ", "DR"), "watertoets zee", lambda: self._watertoets.colonne_overstromingsgevoelig_zee(x, y))
 
-        _colonne_resiliente(valeurs, erreurs, "DY", "watertoets recent_overstroomd", lambda: self._watertoets.recent_overstroomd(x, y))
+        _colonne_resiliente(valeurs, erreurs, "DZ", "watertoets recent_overstroomd", lambda: self._watertoets.recent_overstroomd(x, y))
 
         # -- Économie (EN valeur brute + EO->ER existence) ---------------
         # Bug réel corrigé le 2026-09-24 (1060/1385 lignes vides sur un run
@@ -306,28 +306,28 @@ class ResolveurBE:
         # parcelle Bedrperc existait, laissant la cellule VIDE partout
         # ailleurs -- jamais voulu (même règle que ~100 autres colonnes de ce
         # pipeline : "N" par défaut, jamais deviné mais jamais vide non plus).
-        aangeboden = _get(erreurs, ("EN",), "economie aangeboden_perceel", lambda: self._economie.aangeboden_perceel(x, y))
+        aangeboden = _get(erreurs, ("EO",), "economie aangeboden_perceel", lambda: self._economie.aangeboden_perceel(x, y))
         if aangeboden is _ERREUR:
-            valeurs["EN"] = "ERREUR"
+            valeurs["EO"] = "ERREUR"
         elif aangeboden is None:
-            valeurs["EN"] = "N"
+            valeurs["EO"] = "N"
         else:
-            valeurs["EN"] = "O" if aangeboden == "aangeboden" else "N"
+            valeurs["EO"] = "O" if aangeboden == "aangeboden" else "N"
         for lettre, methode in (
-            ("EO", self._economie.bedrijventerrein), ("EP", self._economie.beheerde_bedrijvenzone),
-            ("EQ", self._economie.ontwikkelbare_bedrijvenzone), ("ER", self._economie.planningszone),
+            ("EP", self._economie.bedrijventerrein), ("EQ", self._economie.beheerde_bedrijvenzone),
+            ("ER", self._economie.ontwikkelbare_bedrijvenzone), ("ES", self._economie.planningszone),
         ):
             _colonne_resiliente(valeurs, erreurs, lettre, f"economie {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Landinrichting / Natuurinrichting / Woningbouw --------------
         for lettre, methode in (
-            ("EW", self._landinrichting.landinrichting_in_onderzoek),
-            ("EX", self._landinrichting.vastgesteld_landinrichtingsproject),
-            ("EY", self._landinrichting.landinrichtingsplan),
-            ("EZ", self._natuurinrichting.natuurinrichting),
-            ("FA", self._ruilverkaveling.ruilverkaveling_uit_kracht_van_wet),
-            ("GF", self._woningbouw.woningbouwgebied),
-            ("GG", self._woningbouw.woonvernieuwingsgebied),
+            ("EX", self._landinrichting.landinrichting_in_onderzoek),
+            ("EY", self._landinrichting.vastgesteld_landinrichtingsproject),
+            ("EZ", self._landinrichting.landinrichtingsplan),
+            ("FA", self._natuurinrichting.natuurinrichting),
+            ("FB", self._ruilverkaveling.ruilverkaveling_uit_kracht_van_wet),
+            ("GG", self._woningbouw.woningbouwgebied),
+            ("GH", self._woningbouw.woonvernieuwingsgebied),
         ):
             _colonne_resiliente(valeurs, erreurs, lettre, f"landinrichting {lettre}", lambda methode=methode: methode(x, y))
 
@@ -338,41 +338,41 @@ class ResolveurBE:
         # mais même risque structurel, corrigé par prudence. Aucun polygone ici est
         # conceptuellement proche de "Onbepaald" (déjà mappé sur N), pas une vraie
         # correspondance -- même repli "N".
-        fb = _get(erreurs, ("FB",), "landschap fysische_systeemeenheid", lambda: self._landschap.fysische_systeemeenheid(x, y))
+        fb = _get(erreurs, ("FC",), "landschap fysische_systeemeenheid", lambda: self._landschap.fysische_systeemeenheid(x, y))
         if fb is _ERREUR:
-            valeurs["FB"] = "ERREUR"
+            valeurs["FC"] = "ERREUR"
         elif fb is None:
-            valeurs["FB"] = "N"
+            valeurs["FC"] = "N"
         else:
-            valeurs["FB"] = "N" if fb == "Onbepaald" else "O"
-        _colonne_resiliente(valeurs, erreurs, "FC", "landschap traditioneel_landschap", lambda: self._landschap.traditioneel_landschap(x, y))
+            valeurs["FC"] = "N" if fb == "Onbepaald" else "O"
+        _colonne_resiliente(valeurs, erreurs, "FD", "landschap traditioneel_landschap", lambda: self._landschap.traditioneel_landschap(x, y))
 
         # -- Nature -----------------------------------------------------
         for lettre, methode in (
-            ("FG", self._natuur.duinendecreet), ("FH", self._natuur.ven),
-            ("FI", self._natuur.habitatrichtlijngebied), ("FJ", self._natuur.vogelrichtlijngebied),
-            ("FF", self._natuur.erkend_natuurreservaat),
-            ("FD", self._natuur.beheergebied_natura2000_soorten),
-            ("FE", self._natuur.bosreservaat),
+            ("FH", self._natuur.duinendecreet), ("FI", self._natuur.ven),
+            ("FJ", self._natuur.habitatrichtlijngebied), ("FK", self._natuur.vogelrichtlijngebied),
+            ("FG", self._natuur.erkend_natuurreservaat),
+            ("FE", self._natuur.beheergebied_natura2000_soorten),
+            ("FF", self._natuur.bosreservaat),
         ):
             _colonne_resiliente(valeurs, erreurs, lettre, f"natuur {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Bodem (érosion) ---------------------------------------------
         for lettre, methode in (
-            ("EL", self._bodem.potentiele_bodemerosie), ("EI", self._bodem.andere_erosiegerelateerde_gronden),
+            ("EM", self._bodem.potentiele_bodemerosie), ("EJ", self._bodem.andere_erosiegerelateerde_gronden),
         ):
             _colonne_resiliente(valeurs, erreurs, lettre, f"bodem {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Seveso -------------------------------------------------------
         for lettre, methode in (
-            ("EU", self._seveso.seveso_inrichting), ("EV", self._seveso.seveso_consultatiezone),
+            ("EV", self._seveso.seveso_inrichting), ("EW", self._seveso.seveso_consultatiezone),
         ):
             _colonne_resiliente(valeurs, erreurs, lettre, f"seveso {lettre}", lambda methode=methode: methode(x, y))
 
         # -- Steunzone / Brownfield ---------------------------------------
         for lettre, methode in (
-            ("ET", self._steunzone_brownfield.steunzone),
-            ("ES", self._steunzone_brownfield.brownfieldconvenant),
+            ("EU", self._steunzone_brownfield.steunzone),
+            ("ET", self._steunzone_brownfield.brownfieldconvenant),
         ):
             _colonne_resiliente(valeurs, erreurs, lettre, f"steunzone {lettre}", lambda methode=methode: methode(x, y))
 
@@ -386,26 +386,26 @@ class ResolveurBE:
 
         # -- Grondverschuivingen -----------------------------------------
         for lettre, methode in (
-            ("EJ", self._grondverschuiving.gekarteerde_grondverschuiving),
-            ("EK", self._grondverschuiving.gevoeligheid_grondverschuiving),
+            ("EK", self._grondverschuiving.gekarteerde_grondverschuiving),
+            ("EL", self._grondverschuiving.gevoeligheid_grondverschuiving),
         ):
             _colonne_resiliente(valeurs, erreurs, lettre, f"grondverschuiving {lettre}", lambda methode=methode: methode(x, y))
 
-        _colonne_resiliente(valeurs, erreurs, "EA", "grondwaterwinning", lambda: self._grondwaterwinning.grondwaterwingebied(x, y))
+        _colonne_resiliente(valeurs, erreurs, "EB", "grondwaterwinning", lambda: self._grondwaterwinning.grondwaterwingebied(x, y))
 
         afstroom_colonnes = tuple(l for l, i in COLONNES_BE.items() if i["groupe"] == "erosion_afstroming")
         _un_parmi_resilient(valeurs, erreurs, afstroom_colonnes, "afstromingskaart", lambda: self._afstromingskaart.colonne_afstromingskaart(x, y))
 
-        _colonne_resiliente(valeurs, erreurs, "EM", "advieskaart watertoets", lambda: self._advieskaart.watertoets(x, y))
+        _colonne_resiliente(valeurs, erreurs, "EN", "advieskaart watertoets", lambda: self._advieskaart.watertoets(x, y))
 
         # -- DE / DV / EB : aucune source live trouvée malgré recherche
         # approfondie (voir wfs_watertoets_service.py) -- "N" partout,
         # SANS couleur distinctive, sur demande explicite du 2026-09-17
         # ("met les tous N sans colorer le fond"). Valeur STRUCTURELLE
         # (pas un appel réseau) -- jamais "ERREUR", rien à retenter ici.
-        valeurs["DE"] = "N"
-        valeurs["DV"] = "N"
-        valeurs["EB"] = "N"
+        valeurs["DF"] = "N"
+        valeurs["DW"] = "N"
+        valeurs["EC"] = "N"
 
         # -- RUP (AF->DB, 75 colonnes) -----------------------------------
         # Décision explicite de l'utilisateur (2026-09-16) : le bloc RUP
